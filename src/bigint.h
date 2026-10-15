@@ -50,6 +50,7 @@ void bi_mul(BigInt *r, const BigInt *a, const BigInt *b);
 void bi_mul_small(BigInt *r, const BigInt *a, uint32_t m);   /* requires m < BI_BASE */
 void bi_pow10(BigInt *r, size_t e);
 void bi_gcd(BigInt *r, const BigInt *a, const BigInt *b);    /* always >= 0 */
+void bi_root(BigInt *r, const BigInt *a, unsigned k);        /* floor(|a|^(1/k)), k >= 1 */
 
 /*
  * Truncating division, like C's / and %: q = a / b rounded toward zero and

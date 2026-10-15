@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#include "rational.h"
+#include "eval.h"
 
 /*
  * The calculator engine. Front ends (the terminal REPL in main.c today, a GUI
@@ -13,7 +13,8 @@
 typedef struct {
     int digits;    /* decimal places (fixed) or significant digits (sci) */
     int sci;       /* nonzero: show results in scientific notation */
-    Rational ans;  /* the last result, available as `ans` */
+    int degrees;   /* nonzero: trig functions use degrees */
+    Value ans;     /* the last result, available as `ans` */
 } Calc;
 
 void calc_init(Calc *c);

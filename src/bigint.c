@@ -488,3 +488,40 @@ void bi_gcd(BigInt *r, const BigInt *a, const BigInt *b)
     bi_free(&y);
     bi_free(&t);
 }
+
+void bi_root(BigInt *r, const BigInt *a, unsigned k)
+{
+    if (a->sign == 0 || k == 1) {
+        bi_copy(r, a);
+        bi_abs(r);
+        return;
+    }
+
+    /* Integer Newton's method: x <- ((k-1)x + a / x^(k-1)) / k. Starting
+     * above the root, x decreases until it stops, at floor(a^(1/k)). */
+    BigInt x, y, p, kk;
+    bi_init(&x);
+    bi_init(&y);
+    bi_init(&p);
+    bi_init(&kk);
+    bi_set_i64(&kk, k);
+    bi_pow10(&x, (bi_num_digits(a) + k - 1) / k);
+    for (;;) {
+        bi_copy(&p, &x);
+        for (unsigned i = 2; i < k; i++)
+            bi_mul(&p, &p, &x);
+        bi_divmod(&y, NULL, a, &p);
+        bi_abs(&y);
+        bi_mul_small(&p, &x, k - 1);
+        bi_add(&y, &y, &p);
+        bi_divmod(&y, NULL, &y, &kk);
+        if (bi_cmp(&y, &x) >= 0)
+            break;
+        bi_swap(&x, &y);
+    }
+    bi_swap(r, &x);
+    bi_free(&x);
+    bi_free(&y);
+    bi_free(&p);
+    bi_free(&kk);
+}

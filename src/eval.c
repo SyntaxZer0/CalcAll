@@ -5,175 +5,674 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "approx.h"
+
 /* Safety limits so a typo like 9^9^9 fails fast instead of freezing. */
 #define MAX_RESULT_DIGITS 1000000
 #define MAX_FACTORIAL 50000
 #define MAX_TERMS 1000000
+#define MAX_EXACT_ROOT 100   /* n-th roots are only tried exactly up to this n */
+
+#define EXTRA 5              /* extra digits for intermediate approximate steps */
+#define LOG10_E 0.43429448190325182765
 
 typedef struct {
     char *msg;
     size_t len;
-} Err;
+    int prec;
+    int degrees;
+} Ctx;
 
-static int fail(Err *e, const char *fmt, ...)
+void val_init(Value *v)
+{
+    rat_init(&v->r);
+    v->exact = 1;
+}
+
+void val_free(Value *v)
+{
+    rat_free(&v->r);
+}
+
+void val_copy(Value *dst, const Value *src)
+{
+    rat_copy(&dst->r, &src->r);
+    dst->exact = src->exact;
+}
+
+void val_swap(Value *a, Value *b)
+{
+    rat_swap(&a->r, &b->r);
+    int t = a->exact;
+    a->exact = b->exact;
+    b->exact = t;
+}
+
+static int fail(Ctx *c, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(e->msg, e->len, fmt, ap);
+    vsnprintf(c->msg, c->len, fmt, ap);
     va_end(ap);
     return -1;
 }
 
-static int need_int(const Rational *v, const char *what, int64_t *out, Err *e)
+static void set_int(Value *v, int64_t n)
 {
-    if (!rat_is_int(v))
-        return fail(e, "%s must be a whole number", what);
-    if (rat_to_i64(v, out))
-        return fail(e, "%s is too large", what);
+    rat_set_i64(&v->r, n);
+    v->exact = 1;
+}
+
+/* Marks v as approximate and rounds it to the working precision. */
+static void approx(Value *v, Ctx *c)
+{
+    v->exact = 0;
+    rat_round_sig(&v->r, &v->r, c->prec);
+}
+
+/*
+ * An approximate result far smaller than the rounding error of the inputs
+ * it came from is just noise: sqrt(2)^2 - 2 or sin(pi) should be 0, not
+ * 1e-31. ref_log10 is the size (log10) of those inputs.
+ */
+static void clamp_noise(Value *v, double ref_log10, Ctx *c)
+{
+    if (!v->exact && !rat_is_zero(&v->r) && rat_log10_abs(&v->r) < ref_log10 - (c->prec - 3))
+        rat_set_i64(&v->r, 0);
+}
+
+static int is_odd(const BigInt *x)
+{
+    return x->len > 0 && (x->limbs[0] & 1);
+}
+
+static int is_one(const Rational *r)
+{
+    return bi_is_one(&r->num) && bi_is_one(&r->den);
+}
+
+static int need_int(const Value *v, const char *what, int64_t *out, Ctx *c)
+{
+    if (!rat_is_int(&v->r))
+        return fail(c, "%s must be a whole number", what);
+    if (rat_to_i64(&v->r, out))
+        return fail(c, "%s is too large", what);
     return 0;
 }
 
-static int check_size(const Rational *v, Err *e)
+static int check_size(const Value *v, Ctx *c)
 {
-    if (rat_size_log10(v) > MAX_RESULT_DIGITS)
-        return fail(e, "result has more than %d digits", MAX_RESULT_DIGITS);
+    if (rat_size_log10(&v->r) > MAX_RESULT_DIGITS)
+        return fail(c, "result has more than %d digits", MAX_RESULT_DIGITS);
     return 0;
 }
 
-static int eval_node(const Node *n, const Binding *env, Rational *out, Err *e);
-
-static int power(Rational *out, const Rational *base, const Rational *exp, Err *e)
+static int too_big(Ctx *c, double digits)
 {
-    int64_t x;
-    if (!rat_is_int(exp))
-        return fail(e, "non-integer exponents are not supported yet");
-    if (rat_to_i64(exp, &x))
-        return fail(e, "exponent is too large");
-    if (rat_is_zero(base) && x < 0)
-        return fail(e, "division by zero (0 to a negative power)");
-    double digits = fabs((double)x) * rat_size_log10(base);
+    return fail(c, "result would have about %.0f digits (limit is %d)", digits, MAX_RESULT_DIGITS);
+}
+
+static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c);
+
+/* ---- Powers and roots ---------------------------------------------------- */
+
+/* If x (>= 0) has an exact n-th root, like 27/8 -> 3/2, store it and return 1. */
+static int exact_root(Rational *out, const Rational *x, int64_t n)
+{
+    if (n < 1 || n > MAX_EXACT_ROOT)
+        return 0;
+    Rational root, check;
+    rat_init(&root);
+    rat_init(&check);
+    bi_root(&root.num, &x->num, (unsigned)n);
+    bi_root(&root.den, &x->den, (unsigned)n);
+    rat_pow(&check, &root, n);
+    int ok = bi_cmp(&check.num, &x->num) == 0 && bi_cmp(&check.den, &x->den) == 0;
+    if (ok)
+        rat_swap(out, &root);
+    rat_free(&root);
+    rat_free(&check);
+    return ok;
+}
+
+/* out = a^y = e^(y ln a) for a > 0. */
+static int pow_approx(Value *out, const Rational *a, const Rational *y, Ctx *c)
+{
+    double digits = rat_to_double(y) * rat_log10_abs(a);   /* log10 of the result */
+    if (fabs(digits) > MAX_RESULT_DIGITS)
+        return too_big(c, fabs(digits));
+    /* y ln a must be accurate to prec digits *after* the decimal point, so
+     * add as many digits as its integer part has. */
+    double size = fabs(digits) / LOG10_E;
+    int p2 = c->prec + EXTRA + (size > 1 ? (int)ceil(log10(size)) : 0);
+    Rational l;
+    rat_init(&l);
+    ap_ln(&l, a, p2);
+    rat_mul(&l, &l, y);
+    rat_round_sig(&l, &l, p2);
+    ap_exp(&out->r, &l, c->prec);
+    out->exact = 0;
+    rat_free(&l);
+    return 0;
+}
+
+/* out = |x|^(1/n), approximately. */
+static void root_approx(Rational *out, const Rational *ax, int64_t n, Ctx *c)
+{
+    if (n == 2) {
+        ap_sqrt(out, ax, c->prec);
+        return;
+    }
+    int p2 = c->prec + EXTRA;
+    Rational nn;
+    rat_init(&nn);
+    rat_set_i64(&nn, n);
+    ap_ln(out, ax, p2);
+    rat_div(out, out, &nn);
+    rat_round_sig(out, out, p2);
+    ap_exp(out, out, c->prec);
+    rat_free(&nn);
+}
+
+static int int_power(Value *out, const Value *a, int64_t n, int exact, Ctx *c)
+{
+    if (rat_is_zero(&a->r)) {
+        if (n < 0)
+            return fail(c, "division by zero (0 to a negative power)");
+        rat_set_i64(&out->r, n == 0 ? 1 : 0);
+        out->exact = exact;
+        return 0;
+    }
+    double digits = fabs((double)n) * rat_size_log10(&a->r);
+    if (a->exact) {
+        if (digits > MAX_RESULT_DIGITS)
+            return too_big(c, digits);
+        rat_pow(&out->r, &a->r, n);
+        out->exact = exact;
+        if (!exact)
+            approx(out, c);
+        return 0;
+    }
+    if (digits <= 20000) {
+        rat_pow(&out->r, &a->r, n);
+        approx(out, c);
+        return 0;
+    }
+    /* A huge power of an approximate number: go through e^(n ln|a|). */
+    Rational abs_a, e;
+    rat_init(&abs_a);
+    rat_init(&e);
+    rat_copy(&abs_a, &a->r);
+    if (rat_sign(&abs_a) < 0)
+        rat_neg(&abs_a);
+    rat_set_i64(&e, n);
+    int rc = pow_approx(out, &abs_a, &e, c);
+    if (rc == 0 && rat_sign(&a->r) < 0 && (n & 1))
+        rat_neg(&out->r);
+    rat_free(&abs_a);
+    rat_free(&e);
+    return rc;
+}
+
+static int power(Value *out, const Value *a, const Value *b, Ctx *c)
+{
+    int exact = a->exact && b->exact;
+    int64_t n;
+
+    if (rat_is_int(&b->r)) {
+        if (rat_to_i64(&b->r, &n))
+            return fail(c, "exponent is too large");
+        return int_power(out, a, n, exact, c);
+    }
+
+    /* Fractional exponent. */
+    if (rat_is_zero(&a->r)) {
+        if (rat_sign(&b->r) < 0)
+            return fail(c, "division by zero (0 to a negative power)");
+        rat_set_i64(&out->r, 0);
+        out->exact = exact;
+        return 0;
+    }
+
+    int negate = 0;
+    if (rat_sign(&a->r) < 0) {
+        /* Only odd roots of negative numbers are real: (-8)^(1/3) = -2. */
+        if (!b->exact)
+            return fail(c, "a negative number to a non-exact power is not supported");
+        if (!is_odd(&b->r.den))
+            return fail(c, "a negative number to this power is not a real number");
+        negate = is_odd(&b->r.num);
+    }
+
+    Rational base, root;
+    rat_init(&base);
+    rat_init(&root);
+    rat_copy(&base, &a->r);
+    if (rat_sign(&base) < 0)
+        rat_neg(&base);
+
+    /* a^(p/q) = (q-th root of a)^p, exact when the root is, like 8^(2/3) = 4. */
+    int rc;
+    int64_t p, q;
+    if (exact && bi_to_i64(&b->r.den, &q) == 0 && bi_to_i64(&b->r.num, &p) == 0 &&
+        exact_root(&root, &base, q)) {
+        Value rv = {root, 1};
+        rc = int_power(out, &rv, p, 1, c);
+        root = rv.r;
+    } else {
+        rc = pow_approx(out, &base, &b->r, c);
+    }
+    if (rc == 0 && negate)
+        rat_neg(&out->r);
+    rat_free(&base);
+    rat_free(&root);
+    return rc;
+}
+
+static int fn_sqrt_root(Value *out, const Value *x, int64_t n, Ctx *c)
+{
+    if (n < 1)
+        return fail(c, "root degree must be at least 1");
+    int neg = rat_sign(&x->r) < 0;
+    if (neg && n % 2 == 0)
+        return fail(c, "%s of a negative number is not a real number",
+                    n == 2 ? "square root" : "even root");
+    if (n == 1 || rat_is_zero(&x->r)) {
+        val_copy(out, x);
+        return 0;
+    }
+    Rational ax;
+    rat_init(&ax);
+    rat_copy(&ax, &x->r);
+    if (neg)
+        rat_neg(&ax);
+    if (x->exact && exact_root(&out->r, &ax, n)) {
+        out->exact = 1;
+    } else {
+        root_approx(&out->r, &ax, n, c);
+        out->exact = 0;
+    }
+    if (neg)
+        rat_neg(&out->r);
+    rat_free(&ax);
+    return 0;
+}
+
+/* ---- Exponentials and logarithms ----------------------------------------- */
+
+static int fn_exp(Value *out, const Value *x, Ctx *c)
+{
+    if (x->exact && rat_is_zero(&x->r)) {
+        set_int(out, 1);
+        return 0;
+    }
+    double digits = rat_to_double(&x->r) * LOG10_E;
+    if (fabs(digits) > MAX_RESULT_DIGITS)
+        return too_big(c, fabs(digits));
+    ap_exp(&out->r, &x->r, c->prec);
+    out->exact = 0;
+    return 0;
+}
+
+/* If x == b^n for a whole number n, like log(1000) = 3, store n and return 1. */
+static int exact_log(int64_t *n, const Rational *x, const Rational *b)
+{
+    double est = rat_log10_abs(x) / rat_log10_abs(b);
+    double r = nearbyint(est);
+    if (fabs(est - r) > 1e-9 * fmax(1, fabs(est)) || fabs(r) > 1e7 ||
+        fabs(r) * rat_size_log10(b) > MAX_RESULT_DIGITS)
+        return 0;
+    Rational t;
+    rat_init(&t);
+    rat_pow(&t, b, (int64_t)r);
+    int ok = bi_cmp(&t.num, &x->num) == 0 && bi_cmp(&t.den, &x->den) == 0;
+    rat_free(&t);
+    if (ok)
+        *n = (int64_t)r;
+    return ok;
+}
+
+/* Logarithm of x in the given base; natural log when base is NULL. */
+static int fn_log(Value *out, const Value *x, const Value *base, Ctx *c)
+{
+    if (rat_sign(&x->r) <= 0)
+        return fail(c, "log of zero or a negative number is undefined");
+    if (base && (rat_sign(&base->r) <= 0 || is_one(&base->r)))
+        return fail(c, "log base must be positive and not 1");
+    if (x->exact && is_one(&x->r)) {
+        set_int(out, 0);
+        return 0;
+    }
+    int64_t n;
+    if (base && x->exact && base->exact && exact_log(&n, &x->r, &base->r)) {
+        set_int(out, n);
+        return 0;
+    }
+    int p2 = c->prec + EXTRA;
+    ap_ln(&out->r, &x->r, p2);
+    if (base) {
+        Rational lb;
+        rat_init(&lb);
+        ap_ln(&lb, &base->r, p2);
+        rat_div(&out->r, &out->r, &lb);
+        rat_free(&lb);
+    }
+    approx(out, c);
+    return 0;
+}
+
+static int fn_log_int_base(Value *out, const Value *x, int64_t b, Ctx *c)
+{
+    Value base;
+    val_init(&base);
+    set_int(&base, b);
+    int rc = fn_log(out, x, &base, c);
+    val_free(&base);
+    return rc;
+}
+
+/* ---- Trigonometry --------------------------------------------------------- */
+
+enum { F_SIN, F_COS, F_TAN, F_ASIN, F_ACOS, F_ATAN, F_SINH, F_COSH, F_TANH };
+
+static void set_frac(Rational *r, int64_t n, int64_t d)
+{
+    rat_set_i64(r, n);
+    bi_set_i64(&r->den, d);
+}
+
+/* sin of a whole number of degrees in [0, 360), when the answer is rational. */
+static int sin_deg_exact(Rational *r, int64_t d)
+{
+    switch (d) {
+    case 0:
+    case 180:
+        rat_set_i64(r, 0);
+        return 1;
+    case 90:
+        rat_set_i64(r, 1);
+        return 1;
+    case 270:
+        rat_set_i64(r, -1);
+        return 1;
+    case 30:
+    case 150:
+        set_frac(r, 1, 2);
+        return 1;
+    case 210:
+    case 330:
+        set_frac(r, -1, 2);
+        return 1;
+    }
+    return 0;
+}
+
+static void to_radians(Rational *r, const Rational *x, Ctx *c)
+{
+    rat_copy(r, x);
+    if (!c->degrees)
+        return;
+    Rational t;
+    rat_init(&t);
+    ap_pi(&t, c->prec + EXTRA);
+    rat_mul(r, r, &t);
+    rat_set_i64(&t, 180);
+    rat_div(r, r, &t);
+    rat_round_sig(r, r, c->prec + EXTRA);
+    rat_free(&t);
+}
+
+static void from_radians(Rational *r, const Rational *x, Ctx *c)
+{
+    rat_copy(r, x);
+    if (!c->degrees)
+        return;
+    Rational t;
+    rat_init(&t);
+    ap_pi(&t, c->prec + EXTRA);
+    rat_div(r, r, &t);
+    rat_set_i64(&t, 180);
+    rat_mul(r, r, &t);
+    rat_round_sig(r, r, c->prec + EXTRA);
+    rat_free(&t);
+}
+
+static int fn_trig(Value *out, const Value *x, int f, Ctx *c)
+{
+    Rational a, s, co;
+    rat_init(&a);
+    rat_init(&s);
+    rat_init(&co);
+    int rc = 0;
+
+    if (c->degrees) {
+        /* Reduce exactly to [0, 360) first; then common angles are exact. */
+        rat_set_i64(&s, 360);
+        rat_mod(&a, &x->r, &s);
+        int64_t d;
+        if (x->exact && rat_to_i64(&a, &d) == 0) {
+            int ok = 0;
+            if (f == F_SIN) {
+                ok = sin_deg_exact(&out->r, d);
+            } else if (f == F_COS) {
+                ok = sin_deg_exact(&out->r, (d + 90) % 360);
+            } else if (d % 180 == 90) {
+                rc = fail(c, "tan is undefined at %lld degrees", (long long)d);
+                goto done;
+            } else if (d % 45 == 0) {
+                rat_set_i64(&out->r, d % 180 == 0 ? 0 : d % 180 == 45 ? 1 : -1);
+                ok = 1;
+            }
+            if (ok) {
+                out->exact = 1;
+                goto done;
+            }
+        }
+        to_radians(&a, &a, c);
+    } else {
+        if (x->exact && rat_is_zero(&x->r)) {
+            set_int(out, f == F_COS ? 1 : 0);
+            goto done;
+        }
+        rat_copy(&a, &x->r);
+    }
+
+    /* The angle is inexact if it was typed that way or converted from degrees. */
+    int noisy = !x->exact || c->degrees;
+    double ref = rat_log10_abs(&a);
+    out->exact = 0;
+    if (f == F_SIN) {
+        ap_sin(&out->r, &a, c->prec);
+    } else if (f == F_COS) {
+        ap_cos(&out->r, &a, c->prec);
+    } else {
+        ap_sin(&s, &a, c->prec + EXTRA);
+        ap_cos(&co, &a, c->prec + EXTRA);
+        if (noisy && !rat_is_zero(&co) && rat_log10_abs(&co) < ref - (c->prec - 3))
+            rat_set_i64(&co, 0);
+        if (rat_is_zero(&co)) {
+            rc = fail(c, "tan is undefined here (cos is 0)");
+            goto done;
+        }
+        rat_div(&out->r, &s, &co);
+        approx(out, c);
+    }
+    if (noisy)
+        clamp_noise(out, ref, c);
+
+done:
+    rat_free(&a);
+    rat_free(&s);
+    rat_free(&co);
+    return rc;
+}
+
+static int fn_inverse_trig(Value *out, const Value *x, int f, Ctx *c)
+{
+    const Rational *v = &x->r;
+    if (f != F_ATAN && bi_cmp_abs(&v->num, &v->den) > 0)
+        return fail(c, "%s needs a value from -1 to 1", f == F_ASIN ? "asin" : "acos");
+
+    /* Exact answers for 0, +-1/2 and +-1 (in degrees; only 0 in radians). */
+    int64_t n, d;
+    if (x->exact && bi_to_i64(&v->num, &n) == 0 && bi_to_i64(&v->den, &d) == 0) {
+        int hit = 1;
+        int64_t deg = 0;
+        if (f == F_ATAN) {
+            if (n == 0)
+                deg = 0;
+            else if (d == 1 && (n == 1 || n == -1))
+                deg = 45 * n;
+            else
+                hit = 0;
+        } else {
+            int64_t as = 0;
+            if (n == 0)
+                as = 0;
+            else if (d == 2 && (n == 1 || n == -1))
+                as = 30 * n;
+            else if (d == 1)
+                as = 90 * n;
+            else
+                hit = 0;
+            deg = f == F_ASIN ? as : 90 - as;
+        }
+        if (hit && (c->degrees || deg == 0)) {
+            set_int(out, deg);
+            return 0;
+        }
+    }
+
+    int p2 = c->prec + EXTRA;
+    Rational t, u, one;
+    rat_init(&t);
+    rat_init(&u);
+    rat_init(&one);
+    rat_set_i64(&one, 1);
+    int unit = bi_cmp_abs(&v->num, &v->den) == 0;   /* |v| == 1 */
+
+    if (f == F_ATAN) {
+        ap_atan(&t, v, p2);
+    } else if (f == F_ASIN) {
+        if (unit) {
+            /* asin(+-1) = +-pi/2 */
+            ap_pi(&t, p2);
+            rat_set_i64(&u, 2 * rat_sign(v));
+            rat_div(&t, &t, &u);
+        } else {
+            /* asin(v) = atan(v / sqrt(1 - v^2)) */
+            rat_mul(&u, v, v);
+            rat_sub(&u, &one, &u);
+            ap_sqrt(&u, &u, p2);
+            rat_div(&u, v, &u);
+            ap_atan(&t, &u, p2);
+        }
+    } else {
+        if (unit && rat_sign(v) < 0) {
+            ap_pi(&t, p2);   /* acos(-1) = pi */
+        } else {
+            /* acos(v) = 2 atan(sqrt((1 - v) / (1 + v))), accurate near v = 1 */
+            rat_add(&t, &one, v);
+            rat_sub(&u, &one, v);
+            rat_div(&u, &u, &t);
+            ap_sqrt(&u, &u, p2);
+            ap_atan(&t, &u, p2);
+            rat_set_i64(&u, 2);
+            rat_mul(&t, &t, &u);
+        }
+    }
+    from_radians(&out->r, &t, c);
+    approx(out, c);
+    rat_free(&t);
+    rat_free(&u);
+    rat_free(&one);
+    return 0;
+}
+
+static int fn_hyperbolic(Value *out, const Value *x, int f, Ctx *c)
+{
+    if (x->exact && rat_is_zero(&x->r)) {
+        set_int(out, f == F_COSH ? 1 : 0);
+        return 0;
+    }
+    double digits = fabs(rat_to_double(&x->r)) * LOG10_E;   /* size of e^|x| */
+    if (f == F_TANH && 2 * digits > c->prec + EXTRA) {
+        /* tanh is +-1 to every digit we keep */
+        rat_set_i64(&out->r, rat_sign(&x->r));
+        out->exact = 0;
+        return 0;
+    }
     if (digits > MAX_RESULT_DIGITS)
-        return fail(e, "result would have about %.0f digits (limit is %d)", digits,
-                    MAX_RESULT_DIGITS);
-    rat_pow(out, base, x);
+        return too_big(c, digits);
+
+    /* sinh and tanh of tiny x subtract nearly equal numbers; add digits. */
+    double lx = rat_log10_abs(&x->r);
+    int p2 = c->prec + EXTRA + (lx < 0 ? (int)ceil(-lx) : 0);
+    Rational e, inv, t;
+    rat_init(&e);
+    rat_init(&inv);
+    rat_init(&t);
+    ap_exp(&e, &x->r, p2);
+    rat_set_i64(&t, 1);
+    rat_div(&inv, &t, &e);
+    if (f == F_SINH || f == F_COSH) {
+        if (f == F_SINH)
+            rat_sub(&out->r, &e, &inv);
+        else
+            rat_add(&out->r, &e, &inv);
+        rat_set_i64(&t, 2);
+        rat_div(&out->r, &out->r, &t);
+    } else {
+        rat_sub(&t, &e, &inv);
+        rat_add(&e, &e, &inv);
+        rat_div(&out->r, &t, &e);
+    }
+    approx(out, c);
+    rat_free(&e);
+    rat_free(&inv);
+    rat_free(&t);
     return 0;
 }
 
-static int factorial(Rational *out, const Rational *v, Err *e)
+/* ---- Whole-number functions ---------------------------------------------- */
+
+static int factorial(Value *out, const Value *v, Ctx *c)
 {
     int64_t n;
-    if (need_int(v, "factorial argument", &n, e))
+    if (need_int(v, "factorial argument", &n, c))
         return -1;
     if (n < 0)
-        return fail(e, "factorial of a negative number is undefined");
+        return fail(c, "factorial of a negative number is undefined");
     if (n > MAX_FACTORIAL)
-        return fail(e, "%lld! is too large (limit is %d!)", (long long)n, MAX_FACTORIAL);
+        return fail(c, "%lld! is too large (limit is %d!)", (long long)n, MAX_FACTORIAL);
     BigInt acc;
     bi_init(&acc);
     bi_set_i64(&acc, 1);
     for (int64_t i = 2; i <= n; i++)
         bi_mul_small(&acc, &acc, (uint32_t)i);
-    rat_set_bigint(out, &acc);
+    rat_set_bigint(&out->r, &acc);
+    out->exact = v->exact;
     bi_free(&acc);
     return 0;
 }
 
-static int binary(Rational *out, char op, const Rational *a, const Rational *b, Err *e)
-{
-    switch (op) {
-    case '+':
-        rat_add(out, a, b);
-        break;
-    case '-':
-        rat_sub(out, a, b);
-        break;
-    case '*':
-        rat_mul(out, a, b);
-        break;
-    case '/':
-        if (rat_div(out, a, b))
-            return fail(e, "division by zero");
-        break;
-    case '%':
-        if (rat_mod(out, a, b))
-            return fail(e, "modulo by zero");
-        break;
-    case '^':
-        return power(out, a, b, e);
-    default:
-        return fail(e, "unknown operator '%c'", op);
-    }
-    return check_size(out, e);
-}
-
-/* sum(k=a, b, body) or prod(k=a, b, body). */
-static int big_op(const Node *n, const Binding *env, Rational *out, Err *e)
-{
-    int is_sum = n->kind == NODE_SUM;
-    const char *opname = is_sum ? "sum" : "prod";
-    Rational lo, hi, idx, term, acc;
-    int64_t a, b;
-    int rc = -1;
-
-    rat_init(&lo);
-    rat_init(&hi);
-    rat_init(&idx);
-    rat_init(&term);
-    rat_init(&acc);
-
-    if (eval_node(n->args[0], env, &lo, e) || eval_node(n->args[1], env, &hi, e))
-        goto done;
-    if (need_int(&lo, "lower bound", &a, e) || need_int(&hi, "upper bound", &b, e))
-        goto done;
-
-    /* An empty range gives the identity: 0 for a sum, 1 for a product. */
-    uint64_t count = b >= a ? (uint64_t)b - (uint64_t)a + 1 : 0;
-    if (count > MAX_TERMS) {
-        fail(e, "%s has too many terms (limit is %d)", opname, MAX_TERMS);
-        goto done;
-    }
-
-    rat_set_i64(&acc, is_sum ? 0 : 1);
-    for (uint64_t i = 0; i < count; i++) {
-        rat_set_i64(&idx, a + (int64_t)i);
-        Binding bind = {n->name, &idx, env};
-        if (eval_node(n->args[2], &bind, &term, e))
-            goto done;
-        if (is_sum)
-            rat_add(&acc, &acc, &term);
-        else
-            rat_mul(&acc, &acc, &term);
-        if (check_size(&acc, e))
-            goto done;
-    }
-    rat_swap(out, &acc);
-    rc = 0;
-
-done:
-    rat_free(&lo);
-    rat_free(&hi);
-    rat_free(&idx);
-    rat_free(&term);
-    rat_free(&acc);
-    return rc;
-}
-
 /* choose(n, k): ways to pick k items from n, = n! / (k! (n-k)!). */
-static int choose(Rational *out, const Rational *nv, const Rational *kv, Err *e)
+static int choose(Value *out, const Value *nv, const Value *kv, Ctx *c)
 {
     int64_t n, k;
-    if (need_int(nv, "n", &n, e) || need_int(kv, "k", &k, e))
+    if (need_int(nv, "n", &n, c) || need_int(kv, "k", &k, c))
         return -1;
+    out->exact = nv->exact && kv->exact;
     if (k < 0 || (n >= 0 && k > n)) {
-        rat_set_i64(out, 0);
+        rat_set_i64(&out->r, 0);
         return 0;
     }
     if (n >= 0 && k > n - k)
         k = n - k;   /* C(n, k) = C(n, n-k); fewer steps */
     if (k > MAX_TERMS)
-        return fail(e, "k is too large (limit is %d)", MAX_TERMS);
+        return fail(c, "k is too large (limit is %d)", MAX_TERMS);
     if (n < INT64_MIN + MAX_TERMS)
-        return fail(e, "n is too large");
+        return fail(c, "n is too large");
 
     /* Multiply in (n-k+i)/i one step at a time; each partial product is
      * itself a binomial coefficient, so the division is always exact. */
@@ -187,26 +686,27 @@ static int choose(Rational *out, const Rational *nv, const Rational *kv, Err *e)
         bi_set_i64(&f, i);
         bi_divmod(&acc, NULL, &acc, &f);
     }
-    rat_set_bigint(out, &acc);
+    rat_set_bigint(&out->r, &acc);
     bi_free(&acc);
     bi_free(&f);
-    return check_size(out, e);
+    return check_size(out, c);
 }
 
 /* perm(n, k): ordered arrangements of k items from n, = n! / (n-k)!. */
-static int perm(Rational *out, const Rational *nv, const Rational *kv, Err *e)
+static int perm(Value *out, const Value *nv, const Value *kv, Ctx *c)
 {
     int64_t n, k;
-    if (need_int(nv, "n", &n, e) || need_int(kv, "k", &k, e))
+    if (need_int(nv, "n", &n, c) || need_int(kv, "k", &k, c))
         return -1;
     if (n < 0 || k < 0)
-        return fail(e, "perm needs n >= 0 and k >= 0");
+        return fail(c, "perm needs n >= 0 and k >= 0");
+    out->exact = nv->exact && kv->exact;
     if (k > n) {
-        rat_set_i64(out, 0);
+        rat_set_i64(&out->r, 0);
         return 0;
     }
     if (k > MAX_FACTORIAL)
-        return fail(e, "k is too large (limit is %d)", MAX_FACTORIAL);
+        return fail(c, "k is too large (limit is %d)", MAX_FACTORIAL);
     BigInt acc, f;
     bi_init(&acc);
     bi_init(&f);
@@ -215,146 +715,365 @@ static int perm(Rational *out, const Rational *nv, const Rational *kv, Err *e)
         bi_set_i64(&f, i);
         bi_mul(&acc, &acc, &f);
     }
-    rat_set_bigint(out, &acc);
+    rat_set_bigint(&out->r, &acc);
     bi_free(&acc);
     bi_free(&f);
-    return check_size(out, e);
+    return check_size(out, c);
 }
 
-static int call(const Node *n, Rational *args, Rational *out, Err *e)
+static int gcd_lcm(Value *out, const Value *a, const Value *b, int lcm, Ctx *c)
+{
+    if (!rat_is_int(&a->r) || !rat_is_int(&b->r))
+        return fail(c, "%s needs whole numbers", lcm ? "lcm" : "gcd");
+    BigInt g;
+    bi_init(&g);
+    bi_gcd(&g, &a->r.num, &b->r.num);
+    if (!lcm) {
+        rat_set_bigint(&out->r, &g);
+    } else if (bi_is_zero(&g)) {
+        rat_set_i64(&out->r, 0);   /* lcm(0, 0) = 0 */
+    } else {
+        /* lcm(a, b) = |a / gcd * b| */
+        BigInt l;
+        bi_init(&l);
+        bi_divmod(&l, NULL, &a->r.num, &g);
+        bi_mul(&l, &l, &b->r.num);
+        bi_abs(&l);
+        rat_set_bigint(&out->r, &l);
+        bi_free(&l);
+    }
+    out->exact = a->exact && b->exact;
+    bi_free(&g);
+    return 0;
+}
+
+static void fn_round(Value *out, const Value *x, int mode)
+{
+    /* mode: -1 floor, +1 ceil, 0 round half away from zero */
+    if (mode < 0) {
+        rat_floor(&out->r, &x->r);
+    } else if (mode > 0) {
+        rat_ceil(&out->r, &x->r);
+    } else {
+        Rational half;
+        rat_init(&half);
+        set_frac(&half, 1, 2);
+        int neg = rat_sign(&x->r) < 0;
+        rat_copy(&out->r, &x->r);
+        if (neg)
+            rat_neg(&out->r);
+        rat_add(&out->r, &out->r, &half);
+        rat_floor(&out->r, &out->r);
+        if (neg)
+            rat_neg(&out->r);
+        rat_free(&half);
+    }
+    out->exact = 1;
+}
+
+/* ---- Dispatch ------------------------------------------------------------ */
+
+static int binary(Value *out, char op, const Value *a, const Value *b, Ctx *c)
+{
+    int exact = a->exact && b->exact;
+    int a_zero = a->exact && rat_is_zero(&a->r), b_zero = b->exact && rat_is_zero(&b->r);
+
+    switch (op) {
+    case '+':
+    case '-': {
+        double la = rat_log10_abs(&a->r), lb = rat_log10_abs(&b->r);
+        if (op == '+')
+            rat_add(&out->r, &a->r, &b->r);
+        else
+            rat_sub(&out->r, &a->r, &b->r);
+        out->exact = exact;
+        if (!exact) {
+            approx(out, c);
+            clamp_noise(out, la > lb ? la : lb, c);
+        }
+        break;
+    }
+    case '*':
+        rat_mul(&out->r, &a->r, &b->r);
+        out->exact = exact || a_zero || b_zero;   /* exactly 0 times anything is 0 */
+        if (!out->exact)
+            approx(out, c);
+        break;
+    case '/':
+        if (rat_div(&out->r, &a->r, &b->r))
+            return fail(c, "division by zero");
+        out->exact = exact || a_zero;
+        if (!out->exact)
+            approx(out, c);
+        break;
+    case '%':
+        if (rat_mod(&out->r, &a->r, &b->r))
+            return fail(c, "modulo by zero");
+        out->exact = exact;
+        if (!exact)
+            approx(out, c);
+        break;
+    case '^':
+        if (power(out, a, b, c))
+            return -1;
+        break;
+    default:
+        return fail(c, "unknown operator '%c'", op);
+    }
+    return check_size(out, c);
+}
+
+/* sum(k=a, b, body) or prod(k=a, b, body). */
+static int big_op(const Node *n, const Binding *env, Value *out, Ctx *c)
+{
+    int is_sum = n->kind == NODE_SUM;
+    const char *opname = is_sum ? "sum" : "prod";
+    Value lo, hi, idx, term, acc;
+    int64_t a, b;
+    int rc = -1;
+
+    val_init(&lo);
+    val_init(&hi);
+    val_init(&idx);
+    val_init(&term);
+    val_init(&acc);
+
+    if (eval_node(n->args[0], env, &lo, c) || eval_node(n->args[1], env, &hi, c))
+        goto done;
+    if (need_int(&lo, "lower bound", &a, c) || need_int(&hi, "upper bound", &b, c))
+        goto done;
+
+    /* An empty range gives the identity: 0 for a sum, 1 for a product. */
+    uint64_t count = b >= a ? (uint64_t)b - (uint64_t)a + 1 : 0;
+    if (count > MAX_TERMS) {
+        fail(c, "%s has too many terms (limit is %d)", opname, MAX_TERMS);
+        goto done;
+    }
+
+    set_int(&acc, is_sum ? 0 : 1);
+    for (uint64_t i = 0; i < count; i++) {
+        set_int(&idx, a + (int64_t)i);
+        Binding bind = {n->name, &idx, env};
+        if (eval_node(n->args[2], &bind, &term, c))
+            goto done;
+        if (is_sum)
+            rat_add(&acc.r, &acc.r, &term.r);
+        else
+            rat_mul(&acc.r, &acc.r, &term.r);
+        acc.exact = acc.exact && term.exact;
+        if (!acc.exact)
+            approx(&acc, c);
+        if (check_size(&acc, c))
+            goto done;
+    }
+    val_swap(out, &acc);
+    rc = 0;
+
+done:
+    val_free(&lo);
+    val_free(&hi);
+    val_free(&idx);
+    val_free(&term);
+    val_free(&acc);
+    return rc;
+}
+
+static int call(const Node *n, Value *args, Value *out, Ctx *c)
 {
     const char *name = n->name;
     size_t argc = n->nargs;
+    int64_t k;
 #define IS(s) (strcmp(name, (s)) == 0)
-#define ARITY(k)                                                                   \
-    do {                                                                           \
-        if (argc != (k))                                                           \
-            return fail(e, "%s takes %d argument%s", name, (k), (k) == 1 ? "" : "s"); \
+#define ARITY(k)                                                                      \
+    do {                                                                              \
+        if (argc != (k))                                                              \
+            return fail(c, "%s takes %d argument%s", name, (k), (k) == 1 ? "" : "s"); \
     } while (0)
 
+    /* Roots and powers */
+    if (IS("sqrt")) {
+        ARITY(1);
+        return fn_sqrt_root(out, &args[0], 2, c);
+    }
+    if (IS("cbrt")) {
+        ARITY(1);
+        return fn_sqrt_root(out, &args[0], 3, c);
+    }
+    if (IS("root")) {
+        ARITY(2);
+        if (need_int(&args[1], "root degree", &k, c))
+            return -1;
+        return fn_sqrt_root(out, &args[0], k, c);
+    }
+    if (IS("exp")) {
+        ARITY(1);
+        return fn_exp(out, &args[0], c);
+    }
+
+    /* Logarithms */
+    if (IS("ln")) {
+        ARITY(1);
+        return fn_log(out, &args[0], NULL, c);
+    }
+    if (IS("log")) {
+        if (argc == 2)
+            return fn_log(out, &args[0], &args[1], c);
+        ARITY(1);
+        return fn_log_int_base(out, &args[0], 10, c);
+    }
+    if (IS("log10")) {
+        ARITY(1);
+        return fn_log_int_base(out, &args[0], 10, c);
+    }
+    if (IS("log2")) {
+        ARITY(1);
+        return fn_log_int_base(out, &args[0], 2, c);
+    }
+
+    /* Trigonometry */
+    static const struct {
+        const char *name;
+        int f;
+    } trig[] = {
+        {"sin", F_SIN},   {"cos", F_COS},   {"tan", F_TAN},   {"asin", F_ASIN}, {"acos", F_ACOS},
+        {"atan", F_ATAN}, {"sinh", F_SINH}, {"cosh", F_COSH}, {"tanh", F_TANH},
+    };
+    for (size_t i = 0; i < sizeof trig / sizeof *trig; i++) {
+        if (IS(trig[i].name)) {
+            int f = trig[i].f;
+            ARITY(1);
+            if (f <= F_TAN)
+                return fn_trig(out, &args[0], f, c);
+            if (f <= F_ATAN)
+                return fn_inverse_trig(out, &args[0], f, c);
+            return fn_hyperbolic(out, &args[0], f, c);
+        }
+    }
+
+    /* Rounding */
     if (IS("abs")) {
         ARITY(1);
-        rat_copy(out, &args[0]);
-        if (rat_sign(out) < 0)
-            rat_neg(out);
+        val_copy(out, &args[0]);
+        if (rat_sign(&out->r) < 0)
+            rat_neg(&out->r);
         return 0;
     }
-    if (IS("floor")) {
+    if (IS("floor") || IS("ceil") || IS("round")) {
         ARITY(1);
-        rat_floor(out, &args[0]);
+        fn_round(out, &args[0], IS("floor") ? -1 : IS("ceil") ? 1 : 0);
         return 0;
     }
-    if (IS("ceil")) {
-        ARITY(1);
-        rat_ceil(out, &args[0]);
-        return 0;
-    }
+
+    /* Whole numbers */
     if (IS("gcd") || IS("lcm")) {
         ARITY(2);
-        if (!rat_is_int(&args[0]) || !rat_is_int(&args[1]))
-            return fail(e, "%s needs whole numbers", name);
-        BigInt g;
-        bi_init(&g);
-        bi_gcd(&g, &args[0].num, &args[1].num);
-        if (IS("gcd")) {
-            rat_set_bigint(out, &g);
-        } else if (bi_is_zero(&g)) {
-            rat_set_i64(out, 0);   /* lcm(0, 0) = 0 */
-        } else {
-            /* lcm(a, b) = |a / gcd * b| */
-            BigInt l;
-            bi_init(&l);
-            bi_divmod(&l, NULL, &args[0].num, &g);
-            bi_mul(&l, &l, &args[1].num);
-            bi_abs(&l);
-            rat_set_bigint(out, &l);
-            bi_free(&l);
-        }
-        bi_free(&g);
-        return 0;
+        return gcd_lcm(out, &args[0], &args[1], IS("lcm"), c);
     }
     if (IS("choose") || IS("nCr") || IS("binomial")) {
         ARITY(2);
-        return choose(out, &args[0], &args[1], e);
+        return choose(out, &args[0], &args[1], c);
     }
     if (IS("perm") || IS("nPr")) {
         ARITY(2);
-        return perm(out, &args[0], &args[1], e);
+        return perm(out, &args[0], &args[1], c);
     }
-    return fail(e, "unknown function '%s'", name);
+    return fail(c, "unknown function '%s'", name);
 #undef IS
 #undef ARITY
 }
 
-static int eval_node(const Node *n, const Binding *env, Rational *out, Err *e)
+static int constant(const char *name, Value *out, Ctx *c)
+{
+    if (strcmp(name, "pi") == 0 || strcmp(name, "\xCF\x80") == 0) {   /* π */
+        ap_pi(&out->r, c->prec);
+        out->exact = 0;
+        return 1;
+    }
+    if (strcmp(name, "e") == 0) {
+        Rational one;
+        rat_init(&one);
+        rat_set_i64(&one, 1);
+        ap_exp(&out->r, &one, c->prec);
+        out->exact = 0;
+        rat_free(&one);
+        return 1;
+    }
+    return 0;
+}
+
+static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
 {
     switch (n->kind) {
     case NODE_NUM:
-        rat_copy(out, &n->value);
+        rat_copy(&out->r, &n->value);
+        out->exact = 1;
         return 0;
 
     case NODE_VAR:
         for (const Binding *b = env; b; b = b->next) {
             if (strcmp(b->name, n->name) == 0) {
-                rat_copy(out, b->value);
+                val_copy(out, b->value);
                 return 0;
             }
         }
-        return fail(e, "unknown variable '%s'", n->name);
+        if (constant(n->name, out, c))
+            return 0;
+        return fail(c, "unknown variable '%s'", n->name);
 
     case NODE_NEG:
-        if (eval_node(n->args[0], env, out, e))
+        if (eval_node(n->args[0], env, out, c))
             return -1;
-        rat_neg(out);
+        rat_neg(&out->r);
         return 0;
 
     case NODE_FACT: {
-        Rational v;
-        rat_init(&v);
-        int rc = eval_node(n->args[0], env, &v, e) || factorial(out, &v, e) ? -1 : 0;
-        rat_free(&v);
+        Value v;
+        val_init(&v);
+        int rc = eval_node(n->args[0], env, &v, c) || factorial(out, &v, c) ? -1 : 0;
+        val_free(&v);
         return rc;
     }
 
     case NODE_BINOP: {
-        Rational a, b;
-        rat_init(&a);
-        rat_init(&b);
-        int rc = eval_node(n->args[0], env, &a, e) || eval_node(n->args[1], env, &b, e) ||
-                         binary(out, n->op, &a, &b, e)
+        Value a, b;
+        val_init(&a);
+        val_init(&b);
+        int rc = eval_node(n->args[0], env, &a, c) || eval_node(n->args[1], env, &b, c) ||
+                         binary(out, n->op, &a, &b, c)
                      ? -1
                      : 0;
-        rat_free(&a);
-        rat_free(&b);
+        val_free(&a);
+        val_free(&b);
         return rc;
     }
 
     case NODE_CALL: {
-        Rational args[8];
+        Value args[8];
         size_t argc = n->nargs;
         if (argc > sizeof args / sizeof *args)
-            return fail(e, "too many arguments to %s", n->name);
+            return fail(c, "too many arguments to %s", n->name);
         for (size_t i = 0; i < argc; i++)
-            rat_init(&args[i]);
+            val_init(&args[i]);
         int rc = 0;
         for (size_t i = 0; i < argc && rc == 0; i++)
-            rc = eval_node(n->args[i], env, &args[i], e);
+            rc = eval_node(n->args[i], env, &args[i], c);
         if (rc == 0)
-            rc = call(n, args, out, e);
+            rc = call(n, args, out, c);
         for (size_t i = 0; i < argc; i++)
-            rat_free(&args[i]);
+            val_free(&args[i]);
         return rc;
     }
 
     case NODE_SUM:
     case NODE_PROD:
-        return big_op(n, env, out, e);
+        return big_op(n, env, out, c);
     }
-    return fail(e, "internal error: unknown node");
+    return fail(c, "internal error: unknown node");
 }
 
-int eval(const Node *n, const Binding *env, Rational *out, char *err, size_t errlen)
+int eval(const Node *n, const Binding *env, const EvalOptions *opt, Value *out, char *err,
+         size_t errlen)
 {
-    Err e = {err, errlen};
-    return eval_node(n, env, out, &e);
+    Ctx c = {err, errlen, opt->prec, opt->degrees};
+    return eval_node(n, env, out, &c);
 }

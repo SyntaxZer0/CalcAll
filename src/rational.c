@@ -1,6 +1,7 @@
 #include "rational.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -386,20 +387,12 @@ static char *format_fixed(const Rational *a, int digits)
     return out.s;
 }
 
-static char *format_sci(const Rational *a, int digits)
+int rat_sig_digits(const Rational *a, int digits, int round, BigInt *q, long *exp10)
 {
-    if (rat_is_zero(a)) {
-        char *s = malloc(2);
-        if (s)
-            strcpy(s, "0");
-        return s;
-    }
-
-    BigInt A, D, p, q, rem;
+    BigInt A, D, p, rem;
     bi_init(&A);
     bi_init(&D);
     bi_init(&p);
-    bi_init(&q);
     bi_init(&rem);
 
     /* Find exponent k and q = floor(|a| / 10^(k - digits + 1)) so that q has
@@ -416,43 +409,181 @@ static char *format_sci(const Rational *a, int digits)
             bi_mul(&A, &A, &p);
         else
             bi_mul(&D, &D, &p);
-        bi_divmod(&q, &rem, &A, &D);
-        if (bi_num_digits(&q) >= (size_t)digits || attempt)
+        bi_divmod(q, &rem, &A, &D);
+        if (bi_num_digits(q) >= (size_t)digits || attempt)
             break;
         k--;
     }
     int exact = bi_is_zero(&rem);
 
+    if (round && !exact) {
+        /* Round half up: if the remainder is at least half of D, bump q. */
+        bi_add(&rem, &rem, &rem);
+        if (bi_cmp_abs(&rem, &D) >= 0) {
+            bi_set_i64(&p, 1);
+            bi_add(q, q, &p);
+            if (bi_num_digits(q) > (size_t)digits) {   /* 999.. rounded up to 1000.. */
+                bi_set_i64(&p, 10);
+                bi_divmod(q, NULL, q, &p);
+                k++;
+            }
+        }
+    }
+
+    *exp10 = k;
+    bi_free(&A);
+    bi_free(&D);
+    bi_free(&p);
+    bi_free(&rem);
+    return exact;
+}
+
+void rat_round_sig(Rational *r, const Rational *a, int digits)
+{
+    if (rat_is_zero(a)) {
+        rat_copy(r, a);
+        return;
+    }
+    BigInt q, p;
+    long k;
+    int neg = a->num.sign < 0;
+    bi_init(&q);
+    bi_init(&p);
+    rat_sig_digits(a, digits, 1, &q, &k);
+
+    /* a ~= q * 10^(k - digits + 1) */
+    long e = k - digits + 1;
+    bi_pow10(&p, (size_t)(e >= 0 ? e : -e));
+    if (e >= 0) {
+        bi_mul(&r->num, &q, &p);
+        bi_set_i64(&r->den, 1);
+    } else {
+        bi_swap(&r->num, &q);
+        bi_swap(&r->den, &p);
+    }
+    if (neg)
+        bi_neg(&r->num);
+    normalize(r);
+    bi_free(&q);
+    bi_free(&p);
+}
+
+void rat_set_frac(Rational *r, const BigInt *num, const BigInt *den)
+{
+    bi_copy(&r->num, num);
+    bi_copy(&r->den, den);
+    normalize(r);
+}
+
+double rat_log10_abs(const Rational *a)
+{
+    if (rat_is_zero(a))
+        return -HUGE_VAL;
+    return bi_log10_abs(&a->num) - bi_log10_abs(&a->den);
+}
+
+double rat_to_double(const Rational *a)
+{
+    if (rat_is_zero(a))
+        return 0;
+    double m = pow(10, rat_log10_abs(a));
+    return a->num.sign < 0 ? -m : m;
+}
+
+/* Builds "d.ddd" (or just "d") from a digit string, then the exponent. */
+static void add_mantissa(Buf *out, const char *m, size_t mlen)
+{
+    buf_addn(out, m, 1);
+    if (mlen > 1) {
+        buf_add(out, ".");
+        buf_addn(out, m + 1, mlen - 1);
+    }
+}
+
+static void add_exponent(Buf *out, long k)
+{
+    char exp[32];
+    snprintf(exp, sizeof exp, "e%+ld", k);
+    buf_add(out, exp);
+}
+
+static char *format_sci(const Rational *a, int digits)
+{
     Buf out = {0};
+    if (rat_is_zero(a)) {
+        buf_add(&out, "0");
+        return out.s;
+    }
+    BigInt q;
+    long k;
+    bi_init(&q);
+    int exact = rat_sig_digits(a, digits, 0, &q, &k);
     char *m = bi_to_str(&q);
     size_t mlen = strlen(m);
-    char exp[32];
     if (exact)
         mlen = strip_trailing_zeros(m, mlen);
     if (a->num.sign < 0)
         buf_add(&out, "-");
-    buf_addn(&out, m, 1);
-    if (mlen > 1) {
-        buf_add(&out, ".");
-        buf_addn(&out, m + 1, mlen - 1);
-    }
+    add_mantissa(&out, m, mlen);
     if (!exact)
         buf_add(&out, "...");
-    snprintf(exp, sizeof exp, "e%+ld", k);
-    buf_add(&out, exp);
-
+    add_exponent(&out, k);
     free(m);
-    bi_free(&A);
-    bi_free(&D);
-    bi_free(&p);
     bi_free(&q);
-    bi_free(&rem);
     return out.s;
 }
 
-char *rat_to_str(const Rational *a, int digits, int sci)
+/*
+ * Approximate values only have `digits` meaningful digits, so they're rounded
+ * to that many significant digits. Numbers too big or too small to show that
+ * way switch to scientific notation; raise :digits to see more.
+ */
+static char *format_approx(const Rational *a, int digits, int sci)
+{
+    Buf out = {0};
+    buf_add(&out, "\xE2\x89\x88 ");   /* "≈ " */
+    if (rat_is_zero(a)) {
+        buf_add(&out, "0");
+        return out.s;
+    }
+    BigInt q;
+    long k;
+    bi_init(&q);
+    rat_sig_digits(a, digits, 1, &q, &k);
+    char *m = bi_to_str(&q);
+    size_t mlen = strip_trailing_zeros(m, strlen(m));
+    if (a->num.sign < 0)
+        buf_add(&out, "-");
+
+    if (sci || k >= digits || k < -6) {
+        add_mantissa(&out, m, mlen);
+        add_exponent(&out, k);
+    } else if (k >= 0) {
+        /* Integer part is the first k+1 digits, padded with zeros if needed. */
+        size_t ilen = (size_t)k + 1;
+        buf_addn(&out, m, mlen < ilen ? mlen : ilen);
+        for (size_t i = mlen; i < ilen; i++)
+            buf_add(&out, "0");
+        if (mlen > ilen) {
+            buf_add(&out, ".");
+            buf_addn(&out, m + ilen, mlen - ilen);
+        }
+    } else {
+        buf_add(&out, "0.");
+        for (long i = 0; i < -k - 1; i++)
+            buf_add(&out, "0");
+        buf_addn(&out, m, mlen);
+    }
+    free(m);
+    bi_free(&q);
+    return out.s;
+}
+
+char *rat_to_str(const Rational *a, int digits, int sci, int exact)
 {
     if (digits < 1)
         digits = 1;
+    if (!exact)
+        return format_approx(a, digits, sci);
     return sci ? format_sci(a, digits) : format_fixed(a, digits);
 }

@@ -9,16 +9,22 @@
 #include "parser.h"
 
 #define DEFAULT_DIGITS 20
-#define MAX_DIGITS 10000
+#define MAX_DIGITS 1000
+#define GUARD_DIGITS 10   /* approximate values keep this many digits beyond those shown */
 
 static const char HELP[] =
     "Operators:  + - * / % ^ !  and ( )\n"
     "Numbers:    42  3.14  .5  6.02e23    (exact: 0.1 + 0.2 = 0.3)\n"
+    "Constants:  pi (or \xCF\x80)  e\n"
     "Sum:        sum(k=1, 100, k^2)        also written \xCE\xA3(k=1, 100, k^2)\n"
     "Product:    prod(k=1, 10, k)          also written \xCE\xA0(k=1, 10, k)\n"
-    "Functions:  abs floor ceil gcd lcm choose(n,k) perm(n,k)\n"
+    "Roots:      sqrt(x)  cbrt(x)  root(x, n)  x^(1/n)\n"
+    "Logs:       ln(x)  log(x) (base 10)  log2(x)  log(x, base)  exp(x)\n"
+    "Trig:       sin cos tan asin acos atan sinh cosh tanh\n"
+    "Other:      abs floor ceil round gcd lcm choose(n,k) perm(n,k)\n"
     "Variables:  ans  (the previous result)\n"
-    "Commands:   :sci  :fix  :digits N  :help  :quit";
+    "Commands:   :deg  :rad  :sci  :fix  :digits N  :help  :quit\n"
+    "\xE2\x89\x88 marks an approximate result; everything else is exact.";
 
 static char *dup_str(const char *s)
 {
@@ -32,12 +38,13 @@ void calc_init(Calc *c)
 {
     c->digits = DEFAULT_DIGITS;
     c->sci = 0;
-    rat_init(&c->ans);
+    c->degrees = 0;
+    val_init(&c->ans);
 }
 
 void calc_free(Calc *c)
 {
-    rat_free(&c->ans);
+    val_free(&c->ans);
 }
 
 static char *command(Calc *c, const char *cmd, char *err, size_t errlen)
@@ -59,6 +66,14 @@ static char *command(Calc *c, const char *cmd, char *err, size_t errlen)
     if (strcmp(word, "fix") == 0) {
         c->sci = 0;
         return dup_str("scientific notation off (whole numbers show every digit)");
+    }
+    if (strcmp(word, "deg") == 0) {
+        c->degrees = 1;
+        return dup_str("angles in degrees");
+    }
+    if (strcmp(word, "rad") == 0) {
+        c->degrees = 0;
+        return dup_str("angles in radians");
     }
     if (strcmp(word, "digits") == 0) {
         if (sscanf(cmd, "%31s %d %1s", word, &n, extra) != 2 || n < 1 || n > MAX_DIGITS) {
@@ -87,15 +102,16 @@ char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
         return NULL;
 
     Binding ans = {"ans", &c->ans, NULL};
-    Rational v;
-    rat_init(&v);
-    int rc = eval(tree, &ans, &v, err, errlen);
+    EvalOptions opt = {c->digits + GUARD_DIGITS, c->degrees};
+    Value v;
+    val_init(&v);
+    int rc = eval(tree, &ans, &opt, &v, err, errlen);
     node_free(tree);
     if (rc) {
-        rat_free(&v);
+        val_free(&v);
         return NULL;
     }
-    rat_swap(&c->ans, &v);
-    rat_free(&v);
-    return rat_to_str(&c->ans, c->digits, c->sci);
+    val_swap(&c->ans, &v);
+    val_free(&v);
+    return rat_to_str(&c->ans.r, c->digits, c->sci, c->ans.exact);
 }

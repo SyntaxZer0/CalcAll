@@ -7,6 +7,21 @@
 #include "rational.h"
 
 /*
+ * A computed value. Exact values are true fractions. Approximate values
+ * (anything that went through sqrt(2), pi, sin, ...) are fractions rounded
+ * to the working precision, and are shown with a "≈".
+ */
+typedef struct {
+    Rational r;
+    int exact;
+} Value;
+
+void val_init(Value *v);   /* exact 0 */
+void val_free(Value *v);
+void val_copy(Value *dst, const Value *src);
+void val_swap(Value *a, Value *b);
+
+/*
  * A chain of variable bindings. sum() and prod() push a binding for their
  * index on top of the caller's chain, so nested sums and outer variables like
  * `ans` all stay visible, and the innermost binding of a name wins.
@@ -14,11 +29,17 @@
 typedef struct Binding Binding;
 struct Binding {
     const char *name;
-    const Rational *value;
+    const Value *value;
     const Binding *next;
 };
 
+typedef struct {
+    int prec;      /* significant digits kept in approximate values */
+    int degrees;   /* nonzero: trig functions use degrees instead of radians */
+} EvalOptions;
+
 /* Returns 0 and stores the result in out, or -1 with a message in err. */
-int eval(const Node *n, const Binding *env, Rational *out, char *err, size_t errlen);
+int eval(const Node *n, const Binding *env, const EvalOptions *opt, Value *out, char *err,
+         size_t errlen);
 
 #endif
