@@ -4,6 +4,7 @@ CALC=${1:-./calc}
 # Never read or write the real ~/.calc_definitions; the saving tests below
 # use a temporary file of their own.
 export CALC_DEFINITIONS=
+export CALC_HISTORY=
 pass=0
 fail=0
 
@@ -201,6 +202,16 @@ report 'saved clear' "error: unknown variable 'x'" "$(CALC_DEFINITIONS=$store "$
 CALC_DEFINITIONS=$store "$CALC" ":save $store.copy" >/dev/null
 report 'load file' "loaded 3 definitions from $store.copy" "$("$CALC" ":load $store.copy" 2>&1)"
 rm -f "$store" "$store.copy"
+
+# History: kept between runs, and listed by :history
+hist=$(mktemp)
+printf '%s\n' '2^10' 'x = 3' ':vars' | CALC_HISTORY=$hist "$CALC" >/dev/null
+report 'history file' "$(printf '2^10\t1024\nx = 3\tx = 3')" "$(cat "$hist")"
+report 'history listed' '   2  x = 3   → x = 3' "$(CALC_HISTORY=$hist "$CALC" ':history' | tail -n 1)"
+report 'history grows' '   3  1+1   → 2' "$(printf '%s\n' '1+1' ':history' | CALC_HISTORY=$hist "$CALC" | tail -n 1)"
+CALC_HISTORY=$hist "$CALC" ':history clear' >/dev/null
+report 'history cleared' 'no calculations yet' "$(CALC_HISTORY=$hist "$CALC" ':history')"
+rm -f "$hist"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

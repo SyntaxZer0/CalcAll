@@ -67,7 +67,11 @@ way it looks on paper, and the answer appears in the bottom right.
   `Ans×3`).
 - Tab and Shift+Tab move to the next and previous box.
 
-The **KEYS/TEXT** switch hides the buttons for typing everything. In TEXT
+The app starts in **TEXT** mode, for typing everything; the **KEYS/TEXT**
+switch brings the buttons back, and the app remembers which you used last
+(along with RAD/DEG, FIX/SCI, S⇔D and the number of digits). The **History**
+button on the Calculate screen lists past calculations, drawn the same way;
+click one to bring it back and work it out again. In TEXT
 mode the calculator syntax from the terminal version turns into templates as
 you type: `sum` becomes Σ, and so do `prod`, `sqrt`, `root`, `cbrt`, `abs`,
 `exp`, `frac` and `pi`. Inside a template, `,` (or `=` after a sum's
@@ -141,6 +145,7 @@ Run it from the repository folder, or keep the `assets` folder next to
 | Implicit × | `2pi`, `3(4+1)`, `2sin(30)` multiply |
 | Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:help`, `:quit` |
 | Definitions | `:vars`, `:clear [name]`, `:save [file]`, `:load file` |
+| History | `:history [N]` lists past calculations, `:history clear` forgets them |
 | Tables | `:table x^2 + 1 from 1 to 5 step 1`, `:table sin(x); cos(x) from 0 to pi step pi/4` |
 
 Approximate results are computed with 10 more digits than are shown, so
@@ -159,6 +164,10 @@ are stored as exact fractions, so `x = 1/3` comes back as exactly 1/3 and an
 approximate value keeps all its digits. Set `CALC_DEFINITIONS` to use another
 file, or to an empty value to turn saving off. `:save file` and `:load file`
 keep separate sets.
+
+Every calculation is also kept in `~/.calc_history` (the last 500), so
+`:history` and the GUI's History button show them in a later session too. Set
+`CALC_HISTORY` to use another file, or to an empty value to keep none.
 
 Complex numbers work everywhere a real number does, and stay exact when
 they can: `(1+2i)(3-i)` = `5 + 5i`, `sqrt(-4)` = `2i`, `sqrt(3+4i)` = `2 + i`,

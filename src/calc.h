@@ -10,6 +10,14 @@
  * later) only need this header: create a Calc, feed it lines, show the text
  * it returns.
  */
+/* One past calculation: what was typed and what it gave. */
+typedef struct {
+    char *input;
+    char *result;
+} HistoryEntry;
+
+#define CALC_HISTORY_MAX 500   /* older calculations are dropped */
+
 typedef struct {
     int digits;    /* decimal places (fixed) or significant digits (sci) */
     int sci;       /* nonzero: show results in scientific notation */
@@ -18,6 +26,9 @@ typedef struct {
     Symbols syms;  /* the user's variables and functions */
     int result_is_value;   /* the last calc_eval() gave a number (else a message) */
     char *store;   /* file definitions are saved to, or NULL */
+    HistoryEntry *history;   /* oldest first */
+    int nhistory;
+    char *history_file;      /* where history is kept between runs, or NULL */
 } Calc;
 
 void calc_init(Calc *c);
@@ -42,6 +53,16 @@ int calc_use_store(Calc *c, const char *path);
  * string to display (empty for a blank line), or NULL with a message in err.
  */
 char *calc_eval(Calc *c, const char *line, char *err, size_t errlen);
+
+/*
+ * Where past calculations are kept: $CALC_HISTORY if set (empty means
+ * don't keep them), else ~/.calc_history. NULL when there's nowhere.
+ */
+const char *calc_default_history(void);
+
+/* Loads the history in `path` (if any) and adds to it from now on. */
+int calc_use_history(Calc *c, const char *path);
+void calc_clear_history(Calc *c);
 
 /* ---- Tables, like a Casio's TABLE mode ---------------------------------------- */
 

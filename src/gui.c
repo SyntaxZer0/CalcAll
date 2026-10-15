@@ -73,7 +73,9 @@ static Entry history[MAX_HISTORY];
 static int nhistory;
 static int shown = -1;        /* history entry whose result is on screen; -1 while editing */
 static int show_fraction = 1; /* S<=>D: exact fractions as a/b instead of decimals */
-static int text_mode;         /* TEXT: no buttons; typed names like "sum" become templates */
+static int text_mode = 1;     /* TEXT: no buttons; typed names like "sum" become templates */
+static int show_history;      /* the Calculate screen shows past calculations */
+static float history_scroll;  /* pixels scrolled up from the newest */
 static char error_text[300];  /* last error, shown until the next edit */
 static float hscroll;         /* sideways scroll of a long expression */
 static int any_hover;
@@ -674,9 +676,122 @@ static void copy_result(void)
 
 /* ---- Screen -------------------------------------------------------------------- */
 
+static int text_button(Rectangle r, const char *label, Color color, float size);
+
+/* Past calculations as natural-display expressions, built from their text. */
+static Row **hist_rows;
+static int hist_rows_count;
+static const char *hist_rows_first;   /* to notice the list changing under us */
+
+static void free_hist_rows(void)
+{
+    for (int i = 0; i < hist_rows_count; i++)
+        row_free(hist_rows[i]);
+    free(hist_rows);
+    hist_rows = NULL;
+    hist_rows_count = 0;
+}
+
+static void update_hist_rows(void)
+{
+    const char *first = calc.nhistory ? calc.history[0].input : NULL;
+    if (hist_rows_count == calc.nhistory && hist_rows_first == first)
+        return;
+    free_hist_rows();
+    hist_rows = calloc((size_t)calc.nhistory + 1, sizeof *hist_rows);
+    if (!hist_rows)
+        exit(1);
+    for (int i = 0; i < calc.nhistory; i++) {
+        /* typing the text back in rebuilds the fractions, roots and sums */
+        Editor t;
+        ed_init(&t);
+        ed_from_text(&t, calc.history[i].input);
+        hist_rows[i] = row_clone(t.root);
+        ed_free(&t);
+    }
+    hist_rows_count = calc.nhistory;
+    hist_rows_first = first;
+}
+
+/* Brings back a past calculation and works it out again. */
+static void reuse_history(int i)
+{
+    ed_load(&ed, hist_rows[i]);
+    show_history = 0;
+    evaluate();
+}
+
+static void draw_history(Rectangle area)
+{
+    update_hist_rows();
+    Rectangle head = {area.x + area.width - 150, area.y + 4, 66, 22};
+    if (calc.nhistory && text_button(head, "Clear", COL_CTRL, 13)) {
+        calc_clear_history(&calc);
+        update_hist_rows();
+    }
+    head.x += 72;
+    head.width = 70;
+    if (text_button(head, "Close", COL_FN, 13))
+        show_history = 0;
+    DrawTextEx(font, "History", (Vector2){area.x + PAD, area.y + 6}, 13, 0, COL_MUTED);
+
+    Rectangle list = {area.x + 4, area.y + 30, area.width - 8, area.height - 34};
+    if (calc.nhistory == 0) {
+        DrawTextEx(font, "No calculations yet.", (Vector2){list.x + 10, list.y + 10}, 16, 0, COL_MUTED);
+        return;
+    }
+    if (CheckCollisionPointRec(GetMousePosition(), list))
+        history_scroll += GetMouseWheelMove() * 40;
+    if (history_scroll < 0)
+        history_scroll = 0;
+
+    /* newest at the bottom, like a terminal; each is the expression, then its result */
+    const float es = 22, rs = 18, gap = 10;
+    float cw = tw("0", rs);
+    int fit = (int)((list.width - 24) / cw);
+    float y = list.y + list.height + history_scroll;
+    BeginScissorMode((int)list.x, (int)list.y, (int)list.width, (int)list.height);
+    for (int i = calc.nhistory - 1; i >= 0 && y > list.y; i--) {
+        Box b = measure(hist_rows[i], es);
+        float h = b.asc + b.desc + rs * 1.2f + gap;
+        y -= h;
+        Rectangle item = {list.x, y, list.width, h};
+        if (CheckCollisionPointRec(GetMousePosition(), item) && CheckCollisionPointRec(GetMousePosition(), list)) {
+            any_hover = 1;
+            DrawRectangleRec(item, ColorBrightness(COL_SCREEN, 0.06f));
+            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                reuse_history(i);
+                break;
+            }
+        }
+        layout_row(hist_rows[i], es, 1, item.x + 10, y + gap / 2 + b.asc, COL_MUTED);
+        char line[512];
+        const char *res = calc.history[i].result;
+        if ((int)strlen(res) > fit && fit > 4)   /* one line: cut a long result short */
+            snprintf(line, sizeof line, "%.*s\xE2\x80\xA6", fit - 1, res);
+        else
+            snprintf(line, sizeof line, "%s", res);
+        Vector2 t = MeasureTextEx(font, line, rs, 0);
+        DrawTextEx(font, line, (Vector2){item.x + item.width - t.x - 10, y + gap / 2 + b.asc + b.desc}, rs, 0,
+                   COL_TEXT);
+    }
+    EndScissorMode();
+    float top = y - list.y;   /* stop scrolling past the oldest */
+    if (top > 0 && history_scroll > 0)
+        history_scroll -= top < history_scroll ? top : history_scroll;
+}
+
 static void draw_screen(Rectangle area)
 {
     DrawRectangleRounded(area, 0.05f, 8, COL_SCREEN);
+    if (show_history) {
+        draw_history(area);
+        return;
+    }
+    if (text_button((Rectangle){area.x + area.width - 78, area.y + 4, 70, 22}, "History", COL_FN, 13)) {
+        show_history = 1;
+        history_scroll = 0;
+    }
 
     /* Status line, like the indicators at the top of a Casio display. */
     char status[64];
@@ -933,7 +1048,7 @@ static void command(const char *cmd)
     free(calc_eval(&calc, cmd, err, sizeof err));
 }
 
-static void draw_modebar(Rectangle area)
+static void draw_modebar_buttons(Rectangle area)
 {
     float unit = (area.width - 5 * GAP) / 6.6f;
     Rectangle r = {area.x, area.y, unit, area.height};
@@ -973,6 +1088,60 @@ static void draw_modebar(Rectangle area)
         copy_result();
 }
 
+/* The mode bar's choices, kept between runs in ~/.calcall_settings. */
+static const char *settings_path(void)
+{
+    static char path[4096];
+    const char *home = getenv("HOME");
+    if (!home || !*home)
+        return NULL;
+    snprintf(path, sizeof path, "%s/.calcall_settings", home);
+    return path;
+}
+
+static void save_settings(void)
+{
+    const char *path = settings_path();
+    FILE *f = path ? fopen(path, "w") : NULL;
+    if (!f)
+        return;
+    fprintf(f, "text %d\ndegrees %d\nsci %d\ndigits %d\nfraction %d\n", text_mode, calc.degrees, calc.sci,
+            calc.digits, show_fraction);
+    fclose(f);
+}
+
+static void load_settings(void)
+{
+    const char *path = settings_path();
+    FILE *f = path ? fopen(path, "r") : NULL;
+    if (!f)
+        return;
+    char key[32];
+    int v;
+    while (fscanf(f, "%31s %d", key, &v) == 2) {
+        if (strcmp(key, "text") == 0)
+            text_mode = v != 0;
+        else if (strcmp(key, "degrees") == 0)
+            calc.degrees = v != 0;
+        else if (strcmp(key, "sci") == 0)
+            calc.sci = v != 0;
+        else if (strcmp(key, "digits") == 0 && v >= 1 && v <= 1000)
+            calc.digits = v;
+        else if (strcmp(key, "fraction") == 0)
+            show_fraction = v != 0;
+    }
+    fclose(f);
+}
+
+static void draw_modebar(Rectangle area)
+{
+    int before[5] = {text_mode, calc.degrees, calc.sci, calc.digits, show_fraction};
+    draw_modebar_buttons(area);
+    int after[5] = {text_mode, calc.degrees, calc.sci, calc.digits, show_fraction};
+    if (memcmp(before, after, sizeof before) != 0)
+        save_settings();
+}
+
 /* ---- Keyboard ------------------------------------------------------------------- */
 
 static void table_key(int key);
@@ -982,6 +1151,13 @@ static void graph_key(int key);
 
 static void handle_key(int key)
 {
+    if (show_history && tab == TAB_CALC) {
+        if (key == KEY_ESCAPE)
+            show_history = 0;
+        if (key != KEY_ENTER && key != KEY_KP_ENTER && key != KEY_BACKSPACE && key != KEY_DELETE)
+            return;
+        show_history = 0;   /* Enter or Backspace: back to the calculation */
+    }
     if (tab == TAB_GRAPH) {
         graph_key(key);
         return;
@@ -1075,6 +1251,7 @@ static void handle_keys(void)
     while ((cp = GetCharPressed()) > 0) {
         if (mod || cp == ' ' || (tab == TAB_TABLE && table_view))
             continue;
+        show_history = 0;   /* typing goes back to the calculation */
         if (text_mode || tab == TAB_GRAPH) {   /* the graph has no keypad: words make templates */
             int n;
             char utf8[8];
@@ -2737,6 +2914,8 @@ int main(void)
     }
     calc_init(&calc);
     calc_use_store(&calc, calc_default_store());   /* bring back saved definitions */
+    calc_use_history(&calc, calc_default_history());
+    load_settings();
     ed_init(&ed);
     for (int i = 0; i < NFIELDS; i++)
         ed_init(&fields[i]);
@@ -2814,6 +2993,7 @@ int main(void)
         ed_free(&fields[i]);
     clear_cells();
     table_free(&table);
+    free_hist_rows();
     for (int i = 0; i < GROWS; i++) {
         ed_free(&grows[i]);
         ed_free(&grange[i][0]);

@@ -85,6 +85,13 @@ void ed_insert_pow(Editor *e, const char *exponent);
  */
 void ed_type(Editor *e, const char *utf8_char);
 
+/*
+ * Rebuilds an expression from calculator text, like "(1/3)+sqrt(2)", by
+ * typing it with ed_type(). The parentheses ed_serialize() puts around a
+ * fraction are dropped again, since the fraction groups its contents itself.
+ */
+void ed_from_text(Editor *e, const char *text);
+
 /* Tab: jump to the next box (dir > 0) or the previous one. */
 void ed_tab(Editor *e, int dir);
 

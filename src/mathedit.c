@@ -434,6 +434,40 @@ void ed_type(Editor *e, const char *ch)
     }
 }
 
+/* Removes "(" and ")" around a lone fraction, in r and every box inside it. */
+static void drop_fraction_parens(Row *r)
+{
+    for (int i = 0; i < r->len; i++)
+        for (int k = 0; k < r->items[i]->nslots; k++)
+            drop_fraction_parens(r->items[i]->slot[k]);
+    for (int i = 0; i + 2 < r->len; i++) {
+        if (is_char(r->items[i], '(') && r->items[i + 1]->kind == IT_FRAC && is_char(r->items[i + 2], ')')) {
+            item_free(row_remove(r, i + 2));
+            item_free(row_remove(r, i));
+            i = i > 0 ? i - 2 : -1;   /* ((1/3)) loses both pairs */
+        }
+    }
+}
+
+void ed_from_text(Editor *e, const char *text)
+{
+    ed_clear(e);
+    for (const char *p = text; *p;) {
+        unsigned char c = (unsigned char)*p;
+        int n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        char one[8] = {0};
+        for (int k = 0; k < n && p[k]; k++)
+            one[k] = p[k];
+        if (*p != ' ')
+            ed_type(e, one);
+        p += strlen(one);
+    }
+    drop_fraction_parens(e->root);
+    e->row = e->root;
+    e->pos = e->root->len;
+    e->fresh = 0;
+}
+
 void ed_tab(Editor *e, int dir)
 {
     Item *owner = e->row->owner;

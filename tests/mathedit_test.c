@@ -181,6 +181,16 @@ int main(void)
     }
     check("word boundary", &e, "xsum", NULL);
 
+    /* Rebuilding from saved text: serialize, rebuild, serialize again is stable. */
+    const char *texts[] = {"(1/3)+(1/6)", "((1/3))+((1/6))", "sqrt(2)", "sum(k=1, 10, k^2)", "(1/(2+3))+1",
+                           "((1/2))^2", "2^10-1"};
+    const char *want[] = {"(1/3)+(1/6)", "(1/3)+(1/6)", "sqrt(2)", "sum(k=1, 10, k^2)", "(1/(2+3))+1",
+                          "(1/2)^2", "2^10-1"};
+    for (size_t i = 0; i < sizeof texts / sizeof *texts; i++) {
+        ed_from_text(&e, texts[i]);
+        check(texts[i], &e, want[i], NULL);
+    }
+
     /* Tab walks through the boxes and out. */
     ed_clear(&e);
     ed_insert_template(&e, IT_FRAC, 0);

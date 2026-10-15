@@ -28,6 +28,7 @@ static const char HELP[] =
     "Implicit:   2pi  3(4+1)  2sin(30)  mean 2*pi, 3*(4+1), 2*sin(30)\n"
     "Commands:   :deg  :rad  :sci  :fix  :digits N  :help  :quit\n"
     "Saving:     :vars  :clear [name]  :save [file]  :load file   (saved automatically)\n"
+    "History:    :history [N]  :history clear   (kept between runs)\n"
     "Tables:     :table x^2 + 1 from 1 to 5 step 1    (add ; g(x) after f(x) for two columns)\n"
     "\xE2\x89\x88 marks an approximate result; everything else is exact.";
 
@@ -48,6 +49,9 @@ void calc_init(Calc *c)
     sym_init(&c->syms);
     c->result_is_value = 0;
     c->store = NULL;
+    c->history = NULL;
+    c->nhistory = 0;
+    c->history_file = NULL;
 }
 
 void calc_free(Calc *c)
@@ -55,6 +59,12 @@ void calc_free(Calc *c)
     val_free(&c->ans);
     sym_free(&c->syms);
     free(c->store);
+    for (int i = 0; i < c->nhistory; i++) {
+        free(c->history[i].input);
+        free(c->history[i].result);
+    }
+    free(c->history);
+    free(c->history_file);
 }
 
 /* Growable string for building messages. */
@@ -490,6 +500,125 @@ char *calc_cell(const Calc *c, const Value *v, int width)
     return s;
 }
 
+/* ---- History ------------------------------------------------------------------
+ *
+ * The history file has one calculation per line: what was typed, a tab, and
+ * the result, with any tabs or newlines in the result written as spaces.
+ */
+
+static void add_history_entry(Calc *c, const char *input, const char *result)
+{
+    if (c->nhistory == CALC_HISTORY_MAX) {
+        free(c->history[0].input);
+        free(c->history[0].result);
+        memmove(c->history, c->history + 1, (CALC_HISTORY_MAX - 1) * sizeof *c->history);
+        c->nhistory--;
+    }
+    HistoryEntry *h = realloc(c->history, (size_t)(c->nhistory + 1) * sizeof *h);
+    if (!h)
+        exit(1);
+    c->history = h;
+    h[c->nhistory].input = dup_str(input);
+    h[c->nhistory].result = dup_str(result);
+    for (char *p = h[c->nhistory].result; *p; p++)
+        if (*p == '\t' || *p == '\n')
+            *p = ' ';
+    c->nhistory++;
+}
+
+static int write_history(Calc *c, const char *mode, int from)
+{
+    FILE *f = fopen(c->history_file, mode);
+    if (!f)
+        return -1;
+    for (int i = from; i < c->nhistory; i++)
+        fprintf(f, "%s\t%s\n", c->history[i].input, c->history[i].result);
+    return fclose(f);
+}
+
+/* After a calculation: remember it, and add it to the file. */
+static void record(Calc *c, const char *input, const char *result)
+{
+    add_history_entry(c, input, result);
+    if (c->history_file)
+        write_history(c, "a", c->nhistory - 1);
+}
+
+const char *calc_default_history(void)
+{
+    static char path[4096];
+    const char *env = getenv("CALC_HISTORY");
+    if (env)
+        return *env ? env : NULL;
+    const char *home = getenv("HOME");
+    if (!home || !*home)
+        return NULL;
+    snprintf(path, sizeof path, "%s/.calc_history", home);
+    return path;
+}
+
+int calc_use_history(Calc *c, const char *path)
+{
+    free(c->history_file);
+    c->history_file = path ? dup_str(path) : NULL;
+    if (!path)
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    int lines = 0;
+    char *line;
+    while ((line = read_line(f))) {
+        char *tab = strchr(line, '\t');
+        if (tab) {
+            *tab = '\0';
+            add_history_entry(c, line, tab + 1);
+        }
+        free(line);
+        lines++;
+    }
+    fclose(f);
+    if (lines > CALC_HISTORY_MAX)   /* trim a file that has grown long */
+        write_history(c, "w", 0);
+    return c->nhistory;
+}
+
+void calc_clear_history(Calc *c)
+{
+    for (int i = 0; i < c->nhistory; i++) {
+        free(c->history[i].input);
+        free(c->history[i].result);
+    }
+    c->nhistory = 0;
+    if (c->history_file)
+        write_history(c, "w", 0);   /* an empty file */
+}
+
+static char *history_command(Calc *c, const char *args)
+{
+    char word[16] = "";
+    int n = 20;
+    if (sscanf(args, "%15s", word) == 1 && strcmp(word, "clear") == 0) {
+        calc_clear_history(c);
+        return dup_str("history cleared");
+    }
+    if (word[0])
+        n = atoi(word) > 0 ? atoi(word) : n;
+    if (c->nhistory == 0)
+        return dup_str("no calculations yet");
+    Buf b = {0};
+    put(&b, "");
+    char num[32];
+    for (int i = c->nhistory > n ? c->nhistory - n : 0; i < c->nhistory; i++) {
+        snprintf(num, sizeof num, "%s%4d  ", b.len ? "\n" : "", i + 1);
+        put(&b, num);
+        put(&b, c->history[i].input);
+        put(&b, "   \xE2\x86\x92 ");   /* → */
+        put(&b, c->history[i].result);
+    }
+    return b.s;
+}
+
 /* :table F [; G] from A to B [step S] */
 static char *table_command(Calc *c, const char *args, char *err, size_t errlen)
 {
@@ -581,6 +710,8 @@ static char *command(Calc *c, const char *cmd, char *err, size_t errlen)
     }
     if (strcmp(word, "vars") == 0)
         return list_symbols(c);
+    if (strcmp(word, "history") == 0)
+        return history_command(c, cmd + strlen("history"));
     if (strcmp(word, "table") == 0)
         return table_command(c, cmd + strlen("table"), err, errlen);
     if (strcmp(word, "save") == 0 || strcmp(word, "load") == 0) {
@@ -700,6 +831,8 @@ char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
     if (tree->kind == NODE_DEFUN) {
         char *out = define_function(c, tree, err, errlen);
         node_free(tree);
+        if (out)
+            record(c, line, out);
         return out;
     }
     if (tree->kind == NODE_ASSIGN && eval_is_reserved(tree->name)) {
@@ -735,5 +868,6 @@ char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
     val_swap(&c->ans, &v);
     val_free(&v);
     c->result_is_value = 1;
+    record(c, line, out);
     return out;
 }
