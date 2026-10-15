@@ -2,11 +2,186 @@
 
 ![CalcAll](assets/logo/wordmark.png)
 
-A calculator in C that keeps numbers exact. Whole numbers show every digit
-(no `E+10` unless you ask for it), fractions stay fractions, and sums and
-products (Σ and Π) are built in. Roots, logs and trig give an exact answer
-when one exists (`sqrt(16)` = 4, `log(1000)` = 3) and a correctly rounded
-approximation, marked `≈`, when it doesn't.
+A calculator in C that does it all and keeps numbers exact. Math is drawn the
+way it looks on paper, like a Casio natural display. There are Casio-style
+tables and a Desmos-style graph. The answer is always as exact as the math
+allows: whole numbers show every digit (no `E+10` unless you ask for it),
+fractions stay fractions, and anything approximate is marked `≈` and is
+correct to every digit shown.
+
+<p align="center">
+  <img src="docs/screenshots/calculate.png" width="260" alt="A sum written with the Σ template, and its exact answer 7381/2520">
+  <img src="docs/screenshots/table.png" width="260" alt="A table of x^3 - 2x and √x from -2 to 2">
+  <img src="docs/screenshots/history.png" width="260" alt="The History panel with earlier calculations">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/graph.png" width="800" alt="The graph tab: a parabola with its key points, a circle, a shaded inequality, a polar curve and a line with a slider">
+</p>
+
+## What it can do
+
+- **Natural display.** Fractions, roots, powers, logs, |x|, Σ and Π are
+  templates with boxes to fill in, and the answer appears in the bottom right.
+- **Type it or tap it.** In TEXT mode you just type: `sum` turns into Σ, `/`
+  makes a fraction, `^` starts a power and Tab moves between boxes. KEYS mode
+  brings back the calculator buttons.
+- **Exact answers.** `2^100` shows all 31 digits, `0.1 + 0.2` is exactly
+  `0.3`, and `1/3` is a fraction. S⇔D switches between fractions and
+  decimals.
+- **Any precision.** Show anywhere from a few digits to thousands
+  (`:digits 1000` gives π to 1000 places).
+- **Sums and products.** Σ and Π are built in, nested as deep as you like.
+- **Roots, logs and trig.** In radians or degrees, with inverse and
+  hyperbolic functions.
+- **Complex numbers.** `sqrt(-4)` = `2i`, `(1+2i)(3-i)` = `5 + 5i`, and
+  `e^(iπ)` ≈ `-1`.
+- **Variables and functions.** `x = 5`, `f(x) = x^2 + 1` and
+  `g(a, b) = sqrt(a^2 + b^2)` are saved automatically and come back the next
+  time you open it.
+- **True or false checks.** These work like a Casio's verify mode:
+  `2 + 2 = 4` → True, `355/113 > π` → True, `1 < x ≤ 5`.
+- **History.** Past calculations are kept between sessions. Click one to use
+  it again.
+- **Tables.** Like a Casio's TABLE mode: f(x) and g(x) over a range, with a
+  Go to box to jump to any row.
+- **Graphing.** Like Desmos: curves, equations, inequalities, parametric and
+  polar curves, points and sliders. Click a curve for its roots, turning
+  points and crossings, worked out exactly.
+- **A terminal version** with the same engine, for scripts and quick sums.
+
+## Install
+
+CalcAll needs [raylib](https://www.raylib.com) for its window. On macOS:
+
+```sh
+brew install raylib
+make app            # builds CalcAll.app, with its icon
+open CalcAll.app    # or drag it into Applications
+```
+
+To run it from the repository instead, use `make gui && ./calc-gui`. On Linux,
+install raylib with your package manager (or build it from source), then run
+`make gui`. If raylib is somewhere unusual, point the Makefile at it:
+
+```sh
+make gui RAYLIB_CFLAGS=-I/path/raylib/src RAYLIB_LIBS=/path/raylib/src/libraylib.a
+```
+
+`./calc-gui` looks for its font in `assets/`, so run it from the repository
+folder or keep `assets` next to it. The app bundle carries its own copy.
+
+The terminal version needs nothing but a C compiler:
+
+```sh
+make                # builds ./calc
+make test           # runs the tests
+```
+
+## Using the app
+
+The window has three tabs: **Calculate**, **Table** and **Graph**. Below the
+screen, the mode bar has these switches:
+
+- **TEXT/KEYS:** typing or buttons.
+- **RAD/DEG:** radians or degrees.
+- **FIX/SCI:** full digits or scientific notation.
+- **S⇔D:** fraction or decimal.
+- **− 20 +:** how many digits to show.
+- **Copy:** copies the answer.
+
+The app remembers all of these between sessions.
+
+### Calculate
+
+Type an expression and press Enter. In **TEXT** mode, which is the default,
+what you type turns into templates:
+
+| Type | Get |
+|---|---|
+| `sum`, `prod` | Σ or Π with boxes for the variable, start and end, and the body |
+| `sqrt`, `cbrt`, `root` | √ templates |
+| `/` | a fraction, with what's before it on top: `1/2+3` is ½ + 3 |
+| `^` | a power: `2^10-1` is 2¹⁰ − 1 |
+| `abs`, `exp`, `frac` | \|x\|, eˣ, a fraction |
+| `pi`, `theta` | π, θ |
+| `<=`, `>=`, `!=` | ≤, ≥, ≠ |
+| `,` or Tab | the next box (Shift+Tab goes back) |
+| `)` | leaves the box you're in |
+
+Typing or pasting `sum(k=1, 10, k^2)` builds the whole Σ. Use the arrow keys
+to move the cursor: Up and Down move between the top and bottom of a
+fraction or sum, and otherwise step through earlier answers. Esc clears the
+line. Starting with an operator carries on from the last answer, so `×3`
+becomes `Ans×3`.
+
+**KEYS** mode shows the calculator buttons. They have the same templates, and
+the keyboard still works.
+
+<img src="docs/screenshots/check.png" width="260" align="right" alt="Σk³ = (Σk)² checked as True">
+
+**True or false.** Type a comparison and it tells you whether it holds:
+
+- `=`, `<`, `>`, `≤`, `≥` and `≠` all work, and so does a chain like
+  `1 < x < 3`.
+- Approximate values count as equal when they agree to the digits shown, so
+  `sqrt(2)^2 = 2` is True.
+- `x = 3` sets x. To check it, type `x == 3`.
+- `!=` means "not equal". To check a factorial, write `(3!) = 6`.
+
+**History.** The History button lists past calculations in the same natural
+display. Click one to load it and work it out again. Clear empties the list.
+
+<br clear="right">
+
+### Table
+
+Fill in f(x), and g(x) if you want a second column. Then fill in Start, End
+and Step; expressions like `pi/4` are fine. Press Enter on Step, or the Table
+button, to see the table.
+
+- **Size:** up to 1000 rows. x goes up exactly, so a step of 0.1 never drifts.
+- **Selecting:** use the arrow keys or click a cell. Its full value shows at
+  the bottom, and Copy copies it.
+- **Jumping:** type a row number, or `x=2.5` for the row whose x is closest,
+  then press Enter.
+- **Gaps:** cells that can't be computed, like 1/x at 0, show ERROR.
+  Complex values show as complex.
+- **Back:** Esc returns to the setup.
+
+### Graph
+
+Type one line per expression. Enter adds a new line, and the coloured dot
+next to a line hides its curve.
+
+| Line | Draws |
+|---|---|
+| `y = x^2`, `sin(x)`, `f(x) = ...` | a curve |
+| `x^2 + y^2 = 9`, `xy = 1`, `x = y^2 - 4` | an equation's curve |
+| `y < sin(x)`, `x^2 + y^2 <= 4` | a shaded region (a dashed edge isn't included) |
+| `(3cos(t), 2sin(2t))` | a parametric curve, with t's range under the line |
+| `r = 1 + cos(theta)` | a polar curve, with θ's range under the line |
+| `(1, 2)`, `(1, 2), (-4, 1)` | points (click one for its exact coordinates) |
+| `a = 2` | a slider |
+
+A line that uses an undefined name, like `y = ax + 1`, offers a button to add
+a slider for it.
+
+To move around, drag to pan and scroll to zoom. The buttons at the top right
+zoom too, and ⌂ goes back to the start. Hovering over a curve traces it.
+
+Click a curve to show its key points: roots, turning points, the
+y-intercept and crossings with other curves. Then click a dot and the exact
+engine pins it down. The minimum of x² − 2x + 3 is exactly (1, 2), and a root
+of x² − 2 is √2 to every digit.
+
+Asymptotes and jumps (1/x, tan x, floor x) are left as gaps instead of being
+joined up. Graph lines can use your own variables and functions.
+
+## The terminal version
+
+`./calc` runs the same engine in a terminal. It shares your saved
+definitions and history with the app.
 
 ```
 > 2^100
@@ -21,123 +196,28 @@ approximation, marked `≈`, when it doesn't.
 0.33333333333333333333...  (= 1/3)
 > sqrt(2)
 ≈ 1.4142135623730950488
-> 8^(2/3)
-4
-> :deg
-angles in degrees
-> sin(30)
-0.5
-> :sci
-scientific notation on (20 significant digits)
-> 2^100
-1.2676506002282294014...e+30
+> sqrt(2)^2 = 2
+True
+> f(x) = x^2 + 1
+f(x) = x^2 + 1
+> f(3i)
+-8
+> :table x^2 from 1 to 3 step 1
+x                       f(x)
+1                       1
+2                       4
+3                       9
 ```
 
-## Build and run
+There are three ways to run it:
 
-```sh
-make            # builds ./calc
-./calc          # interactive prompt
-./calc '50!'    # evaluate once
-make test       # run the tests
-```
+- `./calc` starts the prompt.
+- `./calc '50!'` works out one thing and exits.
+- `echo '2^64' | ./calc` reads lines from a pipe.
 
-### GUI
-
-The GUI uses [raylib](https://www.raylib.com). On macOS:
-
-```sh
-brew install raylib
-make gui
-./calc-gui
-```
-
-The screen works like a Casio "natural display": the expression is drawn the
-way it looks on paper, and the answer appears in the bottom right.
-
-- The fraction, root, power, log and |x| buttons insert templates with boxes to
-  fill in. Σ and Π put the upper limit on top and `k=` the start below.
-- Arrow keys move between boxes; Up/Down move between the top and bottom of a
-  fraction or sum, and otherwise replay earlier calculations.
-- On the keyboard, `/` turns the number before it into a numerator and `^`
-  starts a power. Enter evaluates, Esc clears, Cmd+C copies the result.
-- Exact answers that aren't whole numbers show as fractions; S⇔D switches
-  them to decimals.
-- Starting with an operator continues from the last answer (`×3` becomes
-  `Ans×3`).
-- Tab and Shift+Tab move to the next and previous box.
-
-The app starts in **TEXT** mode, for typing everything; the **KEYS/TEXT**
-switch brings the buttons back, and the app remembers which you used last
-(along with RAD/DEG, FIX/SCI, S⇔D and the number of digits). The **History**
-button on the Calculate screen lists past calculations, drawn the same way;
-click one to bring it back and work it out again. In TEXT
-mode the calculator syntax from the terminal version turns into templates as
-you type: `sum` becomes Σ, and so do `prod`, `sqrt`, `root`, `cbrt`, `abs`,
-`exp`, `frac` and `pi`. Inside a template, `,` (or `=` after a sum's
-variable) moves to the next box and `)` leaves it, so typing or pasting
-`sum(k=1, 10, k^2)` builds the Σ with its boxes filled in. `1/2+3` and
-`2^10-1` follow normal precedence, ending the fraction or power at the
-operator.
-
-The **Table** tab works like a Casio's TABLE mode: enter f(x) and, if you
-like, g(x), then Start, End and Step (expressions such as `pi/4` are fine),
-and press Enter on Step or the Table button. Tables can have up to 1000 rows;
-x goes up exactly, so a step of 0.1 never drifts. Arrow keys or clicks select
-a cell, and its full-precision value shows at the bottom (Copy copies it).
-To jump through a long table, just type a row number (or `x=2.5` for the row
-whose x is closest) into the Go to box and press Enter.
-Cells that can't be computed, like 1/x at 0, show ERROR. In the terminal,
-`:table x^2 + 1 from 1 to 5 step 1` prints the same thing (add `; g(x)` after
-f(x) for a second column).
-
-The **Graph** tab works like Desmos. Type one line per expression: `y = x^2`,
-`sin(x)` or `f(x) = ...` draws a curve in its own color, `a = 2` makes a
-slider, and a line that uses an undefined name like `y = ax + 1` offers an
-"add slider" button for it. Drag to pan, scroll to zoom (the buttons at the
-top right zoom too, and ⌂ goes back to the start), and hover over a curve to
-trace it. Click a curve to show dots at its roots, turning points,
-y-intercept and crossings with other curves; click a dot and the exact engine
-pins it down to full precision, exactly when it can (the minimum of
-x^2 - 2x + 3 is exactly (1, 2); a root of x^2 - 2 is √2 to every digit). The
-window widens the first time you open the Graph tab, and the list sits beside
-the graph when there's room.
-
-Lines can also be:
-
-| | |
-|---|---|
-| Equations | `x^2 + y^2 = 9`, `xy = 1`, `x = y^2 - 4`, `y = y^2 + x` |
-| Inequalities | `y < sin(x)`, `x^2 + y^2 <= 4`, `x > 4` (shaded; a dashed edge isn't included) |
-| Parametric curves | `(3cos(t), 2sin(2t))`, with t's range in the boxes under the line |
-| Polar curves | `r = 1 + cos(θ)` (type `theta`), with θ's range under the line |
-| Points | `(1, 2)`, `(1, 2), (-4, 1), (a, -3)`; click one for its exact coordinates |
-
-`<=` and `>=` can be typed for ≤ and ≥. As in Desmos, letters next to each
-other multiply (`xy = 1` is a hyperbola) and `r = 2` is a circle, not a
-slider.
-
-Curves are drawn with a fast floating-point evaluator so panning stays
-smooth; asymptotes (1/x, tan x) and jumps (floor x) are left as gaps instead
-of being joined up. Graph lines can use your own variables and functions,
-and their own definitions stay local to the graph.
-
-On macOS, `make app` builds **CalcAll.app**, which has the logo as its Dock
-icon; open it with `open CalcAll.app` or drag it into Applications.
-
-Run it from the repository folder, or keep the `assets` folder next to
-`calc-gui`, so it can find its font.
+`:help` lists everything.
 
 ## What it understands
-
-Typing a comparison checks it, like the verify mode on a Casio: `2 + 2 = 4`
-says True, and `<`, `>`, `<=` (≤), `>=` (≥) and `!=` (≠) work too, chained if
-you like (`1 < x < 3`). In the window, `<=`, `>=` and `!=` turn into ≤, ≥ and ≠
-as you type. Exact values must match exactly; approximate ones count as equal
-when they agree to the digits shown, so `sqrt(2)^2 = 2` is True. `x = 3`
-still sets x, so check a variable with `x == 3`. `!=` always means "not
-equal": to check a factorial, write `(3!) = 6` (or `3! = 6` with a space, in
-the terminal).
 
 | | |
 |---|---|
@@ -154,41 +234,51 @@ the terminal).
 | Variables | `x = 5`, `rate = 0.05`, `θ = pi/3`; `ans` (or `Ans`) is the previous result |
 | Functions | `f(x) = x^2 + 1`, `g(a, b) = sqrt(a^2 + b^2)`, then `f(3)`, `g(3, 4)` |
 | Implicit × | `2pi`, `3(4+1)`, `2sin(30)` multiply |
+| True or false | `2 + 2 = 4` → True, `pi > 3.14`, `1 < x ≤ 5`, `x == 3`, `3 != 4` (or `≠`, `<>`) |
 | Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:help`, `:quit` |
 | Definitions | `:vars`, `:clear [name]`, `:save [file]`, `:load file` |
 | History | `:history [N]` lists past calculations, `:history clear` forgets them |
-| True or false | `2 + 2 = 4` → True, `sqrt(2)^2 = 2`, `pi > 3.14`, `1 < x ≤ 5`, `x == 3`, `3 != 4` (or `≠`, `<>`) |
 | Tables | `:table x^2 + 1 from 1 to 5 step 1`, `:table sin(x); cos(x) from 0 to pi step pi/4` |
 
-Approximate results are computed with 10 more digits than are shown, so
-every digit you see is correct. `:digits 1000` gives π to 1000 places.
+### How exact is it?
 
-A variable stores the value its right side has when you define it
-(`y = x^2` keeps 25 even if `x` changes later). A function's body is looked
-up each time it runs, so it uses the current values of your variables.
-Built-in names like `sin`, `pi` and `ans` can't be redefined. Letters next to
-each other multiply when there's no variable by that name, so with `x` and
-`y` defined, `xy` is `x*y`.
+Exact values are true fractions of any size. Roots, logs and trig give an
+exact answer when one exists (`sqrt(16)` = 4, `log(1000)` = 3, `sin(30)` =
+1/2 in degrees). When there isn't one, the answer is an approximation computed
+with 10 more digits than are shown, so every digit you see is correct. Real
+and complex functions have been checked against [mpmath](https://mpmath.org)
+to 50 digits.
 
-Definitions are saved automatically to `~/.calc_definitions` after every
-change and loaded again at startup, in the terminal and the GUI alike. Values
-are stored as exact fractions, so `x = 1/3` comes back as exactly 1/3 and an
-approximate value keeps all its digits. Set `CALC_DEFINITIONS` to use another
-file, or to an empty value to turn saving off. `:save file` and `:load file`
-keep separate sets.
+Complex numbers stay exact when they can: `sqrt(3+4i)` = `2 + i` and
+`abs(3+4i)` = `5`. Functions use their principal values, like most
+calculators. Odd roots of negative numbers stay real, so `cbrt(-8)` and
+`(-8)^(1/3)` are both `-2`.
 
-Every calculation is also kept in `~/.calc_history` (the last 500), so
-`:history` and the GUI's History button show them in a later session too. Set
-`CALC_HISTORY` to use another file, or to an empty value to keep none.
+### Variables and functions
 
-Complex numbers work everywhere a real number does, and stay exact when
-they can: `(1+2i)(3-i)` = `5 + 5i`, `sqrt(-4)` = `2i`, `sqrt(3+4i)` = `2 + i`,
-`abs(3+4i)` = `5`, while `e^(iπ)` gives `≈ -1` and `asin(2)` gives
-`≈ 1.5707963267948966192 - 1.3169578969248167086i`. Functions use their
-principal values, like most calculators; odd roots of negative numbers stay
-real, so `cbrt(-8)` and `(-8)^(1/3)` are `-2`.
+- **Variables** keep the value their right side had when you defined them:
+  `y = x^2` stays 25 even if x changes later.
+- **Functions** are worked out each time they're used, so they see your
+  current variables.
+- **Built-in names** like `sin`, `pi` and `ans` can't be redefined.
+- **Letters next to each other multiply** when there's no variable by that
+  name, so with x and y defined, `xy` is x·y.
+
+### Files
+
+| File | Holds | Override |
+|---|---|---|
+| `~/.calc_definitions` | your variables and functions, saved after every change | `CALC_DEFINITIONS` |
+| `~/.calc_history` | the last 500 calculations | `CALC_HISTORY` |
+| `~/.calcall_settings` | the app's mode bar settings | |
+
+Setting `CALC_DEFINITIONS` or `CALC_HISTORY` to an empty value turns that
+file off. Values are saved as exact fractions, so `x = 1/3` comes back as
+exactly 1/3.
 
 ## How it's built
+
+Everything is plain C11. The only library it uses is raylib, for the window.
 
 ```
 src/bigint.c    arbitrary-precision integers (add, multiply, long division)
@@ -198,15 +288,15 @@ src/cmath.c     complex arithmetic and complex exp, ln, sqrt, sin, cos, ...
 src/parser.c    text -> expression tree (recursive descent)
 src/eval.c      walks the tree; tracks exact vs approximate; all functions
 src/symbols.c   the table of user variables and functions
+src/calc.c      the engine API a front end calls: calc_eval(line) -> text
 src/feval.c     fast floating-point evaluation for drawing graphs
 src/graph.c     the graph's expression list, and exact key points
-src/calc.c      the engine API a front end calls: calc_eval(line) -> text
 src/main.c      the terminal front end
 src/mathedit.c  the natural-display editor: templates, cursor, to-text
-src/gui.c       the raylib front end: draws the templates and buttons
+src/gui.c       the raylib front end: screen, buttons, table and graph tabs
 ```
 
-Both front ends only use `calc.h`: they pass a line of text to `calc_eval`
-and show the text it returns.
+Both front ends talk to the engine through `calc.h`. They pass it a line of
+text with `calc_eval` and show the text that comes back.
 
 The bundled font is DejaVu Sans Mono; see `assets/DejaVu-LICENSE.txt`.
