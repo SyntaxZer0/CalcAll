@@ -24,6 +24,7 @@
 #include "raylib.h"
 
 #include "calc.h"
+#include "graph.h"
 #include "mathedit.h"
 
 #define MAX_HISTORY 100
@@ -80,7 +81,7 @@ static int any_hover;
 static Row *icons[8];         /* little expressions drawn on template buttons */
 
 /* Table mode, like a Casio's TABLE: f(x), g(x), Start, End, Step -> rows */
-enum { TAB_CALC, TAB_TABLE };
+enum { TAB_CALC, TAB_TABLE, TAB_GRAPH };
 enum { FIELD_F, FIELD_G, FIELD_START, FIELD_END, FIELD_STEP, NFIELDS };
 static int tab = TAB_CALC;
 static Editor fields[NFIELDS];
@@ -651,9 +652,14 @@ static void draw_fraction_result(const char *s, Rectangle area)
 }
 
 static void copy_cell(void);
+static void copy_key_point(void);
 
 static void copy_result(void)
 {
+    if (tab == TAB_GRAPH) {
+        copy_key_point();
+        return;
+    }
     if (tab == TAB_TABLE && table_view) {
         copy_cell();
         return;
@@ -972,8 +978,14 @@ static void draw_modebar(Rectangle area)
 static void table_key(int key);
 static void set_focus(int f);
 
+static void graph_key(int key);
+
 static void handle_key(int key)
 {
+    if (tab == TAB_GRAPH) {
+        graph_key(key);
+        return;
+    }
     if (tab == TAB_TABLE && table_view) {
         table_key(key);
         return;
@@ -1063,7 +1075,7 @@ static void handle_keys(void)
     while ((cp = GetCharPressed()) > 0) {
         if (mod || cp == ' ' || (tab == TAB_TABLE && table_view))
             continue;
-        if (text_mode) {
+        if (text_mode || tab == TAB_GRAPH) {   /* the graph has no keypad: words make templates */
             int n;
             char utf8[8];
             const char *bytes = CodepointToUTF8(cp, &n);
@@ -1097,7 +1109,7 @@ static void handle_keys(void)
                 if (clip[i] != '\n' && clip[i] != '\r' && clip[i] != '\t')
                     buf[j++] = clip[i];
             buf[j] = '\0';
-            if (text_mode) {
+            if (text_mode || tab == TAB_GRAPH) {
                 /* Pasting "sum(k=1, 10, k^2)" builds the template too. */
                 for (const char *p = buf; *p;) {
                     unsigned char c = (unsigned char)*p;
@@ -1134,10 +1146,15 @@ static void set_focus(int f)
     cur = &fields[focus];
 }
 
+static void graph_entered(void);
+static Editor *graph_editor(void);
+
 static void set_tab(int t)
 {
     tab = t;
-    cur = tab == TAB_TABLE ? &fields[focus] : &ed;
+    cur = tab == TAB_TABLE ? &fields[focus] : tab == TAB_GRAPH ? graph_editor() : &ed;
+    if (tab == TAB_GRAPH)
+        graph_entered();
 }
 
 /* Cell text cache: formatting thousands of values every frame would be slow. */
@@ -1287,9 +1304,9 @@ static void copy_cell(void)
 
 static void draw_tabs(Rectangle area)
 {
-    const char *names[] = {"Calculate", "Table"};
-    float w = (area.width - GAP) / 2;
-    for (int i = 0; i < 2; i++) {
+    const char *names[] = {"Calculate", "Table", "Graph"};
+    float w = (area.width - 2 * GAP) / 3;
+    for (int i = 0; i < 3; i++) {
         Rectangle r = {area.x + (float)i * (w + GAP), area.y, w, area.height};
         int active = tab == i;
         if (button_frame(r, active ? COL_SCREEN : COL_BG) && !active)
@@ -1302,46 +1319,55 @@ static void draw_tabs(Rectangle area)
     }
 }
 
-/* One input field of the setup, drawn in `r`; clicking it gives it focus. */
-static void draw_field(int f, Rectangle r, float size)
+/*
+ * An editable expression in a box: draws it (with the cursor when focused),
+ * keeps the cursor in view by scrolling sideways, and returns 1 when clicked.
+ */
+static int editor_box(Editor *e, float *scroll, int focused, Rectangle r, float size, const char *placeholder)
 {
-    int focused = focus == f;
+    int clicked = 0;
     if (CheckCollisionPointRec(GetMousePosition(), r)) {
         any_hover = 1;
-        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-            set_focus(f);
-            table_error[0] = '\0';
-        }
+        clicked = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
     }
     DrawRectangleRounded(r, 0.2f, 6, ColorBrightness(COL_SCREEN, -0.25f));
     if (focused)
         DrawRectangleRoundedLinesEx(r, 0.2f, 6, 1.5f, COL_CURSOR);
 
-    Box b = measure(fields[f].root, size);
+    Box b = measure(e->root, size);
     float base = r.y + (r.height - (b.asc + b.desc)) / 2 + b.asc;
     float x = r.x + 8;
-    caret_ed = focused ? &fields[f] : NULL;
+    caret_ed = focused ? e : NULL;
     caret_found = 0;
     BeginScissorMode((int)r.x + 2, (int)r.y, (int)r.width - 4, (int)r.height);
-    layout_row(fields[f].root, size, 1, x - field_scroll[f], base, COL_TEXT);
-    if (f == FIELD_G && ed_is_empty(&fields[f]) && !focused)
-        DrawTextEx(font, "optional", (Vector2){x, r.y + (r.height - 14) / 2}, 14, 0, COL_MUTED);
+    layout_row(e->root, size, 1, x - *scroll, base, COL_TEXT);
+    if (placeholder && ed_is_empty(e) && !focused)
+        DrawTextEx(font, placeholder, (Vector2){x, r.y + (r.height - 14) / 2}, 14, 0, COL_MUTED);
     if (caret_found && ((int)(GetTime() * 2.5)) % 2 == 0)
         DrawRectangleRec(caret, COL_CURSOR);
     EndScissorMode();
     caret_ed = NULL;
 
-    /* Scroll sideways to keep the cursor in view. */
     float room = r.width - 16;
     if (caret_found) {
-        float cx = caret.x + field_scroll[f] - x;
-        if (cx - field_scroll[f] > room)
-            field_scroll[f] = cx - room;
-        if (cx - field_scroll[f] < 0)
-            field_scroll[f] = cx;
+        float cx = caret.x + *scroll - x;
+        if (cx - *scroll > room)
+            *scroll = cx - room;
+        if (cx - *scroll < 0)
+            *scroll = cx;
     }
     if (b.w <= room)
-        field_scroll[f] = 0;
+        *scroll = 0;
+    return clicked;
+}
+
+/* One input field of the table setup; clicking it gives it focus. */
+static void draw_field(int f, Rectangle r, float size)
+{
+    if (editor_box(&fields[f], &field_scroll[f], focus == f, r, size, f == FIELD_G ? "optional" : NULL)) {
+        set_focus(f);
+        table_error[0] = '\0';
+    }
 }
 
 static void draw_table_setup(Rectangle area)
@@ -1469,6 +1495,852 @@ static void draw_table_view(Rectangle area)
     }
 }
 
+/* ---- Graph mode ------------------------------------------------------------------- */
+
+#define GROWS GRAPH_MAX_ROWS
+#define MAX_SAMPLES 4096
+#define MAX_KEYPOINTS 64
+
+static Editor grows[GROWS];        /* the expression list */
+static float grow_scroll[GROWS];
+static int ghidden[GROWS];         /* curve switched off with its color dot */
+static int gempty[GROWS];          /* line still has an empty box */
+static int ngrows = 1, gfocus;
+static Graph graph;
+static char *graph_sig;            /* all lines' text, to notice edits */
+static double view_x, view_y, view_scale = 50;   /* centre, in graph units; pixels per unit */
+static Rectangle grect;            /* where the graph is drawn */
+static int window_widened;
+static int sel_curve = -1;         /* curve whose key points are shown */
+static float list_scroll;
+static int panning, pan_moved, slider_drag = -1;
+static Vector2 pan_from;
+
+static double sample_x[MAX_SAMPLES];
+static double samples[GROWS][MAX_SAMPLES];
+static int sampled[GROWS];
+static int nsamples;
+
+typedef struct {
+    double x, y, lo, hi;
+    PointKind kind;
+    int row, other;
+} KeyPoint;
+static KeyPoint kps[MAX_KEYPOINTS];
+static int nkps;
+static int kp_selected;            /* kp_sel holds a refined key point */
+static KeyPoint kp_sel;
+static char *kp_x, *kp_y;
+
+static const Color CURVE_COLORS[] = {
+    {235, 95, 85, 255},  {80, 150, 235, 255},  {95, 195, 105, 255}, {170, 125, 245, 255},
+    {250, 155, 60, 255}, {70, 205, 205, 255},  {235, 115, 195, 255}, {205, 200, 90, 255},
+};
+
+static Color curve_color(int row)
+{
+    return CURVE_COLORS[row % (int)(sizeof CURVE_COLORS / sizeof *CURVE_COLORS)];
+}
+
+static Editor *graph_editor(void)
+{
+    return &grows[gfocus];
+}
+
+static void set_gfocus(int f)
+{
+    gfocus = f < 0 ? 0 : f >= ngrows ? ngrows - 1 : f;
+    cur = &grows[gfocus];
+    if (graph.count > gfocus && graph.rows[gfocus].plots)
+        sel_curve = gfocus;
+}
+
+static void clear_key_point(void)
+{
+    kp_selected = 0;
+    free(kp_x);
+    free(kp_y);
+    kp_x = kp_y = NULL;
+}
+
+/* Graphs need room: widen a narrow window the first time. */
+static void graph_entered(void)
+{
+    if (window_widened)
+        return;
+    window_widened = 1;
+    int mon = GetCurrentMonitor();
+    int mw = GetMonitorWidth(mon), mh = GetMonitorHeight(mon);
+    int w = 1100, h = GetScreenHeight() > 760 ? GetScreenHeight() : 760;
+    if (mw > 0 && w > mw * 9 / 10)
+        w = mw * 9 / 10;
+    if (mh > 0 && h > mh * 85 / 100)
+        h = mh * 85 / 100;
+    if (GetScreenWidth() >= w)
+        return;
+    SetWindowSize(w, h);
+    /* Keep the wider window on the screen. */
+    Vector2 pos = GetWindowPosition(), mpos = GetMonitorPosition(mon);
+    float x = pos.x, y = pos.y;
+    if (mw > 0 && x + (float)w > mpos.x + (float)mw)
+        x = mpos.x + (float)(mw - w) / 2;
+    if (mh > 0 && y + (float)h > mpos.y + (float)mh)
+        y = mpos.y + (float)(mh - h) / 2;
+    if (x != pos.x || y != pos.y)
+        SetWindowPosition((int)x, (int)y);
+}
+
+static void add_grow(const char *text)
+{
+    if (ngrows >= GROWS)
+        return;
+    ed_clear(&grows[ngrows]);
+    ed_insert_text(&grows[ngrows], text);
+    ghidden[ngrows] = 0;
+    ngrows++;
+}
+
+static void remove_grow(int i)
+{
+    if (ngrows <= 1)
+        return;
+    /* Rotate the removed editor to the end so no two slots share one. */
+    Editor gone = grows[i];
+    memmove(&grows[i], &grows[i + 1], (size_t)(GROWS - i - 1) * sizeof *grows);
+    grows[GROWS - 1] = gone;
+    ed_clear(&grows[GROWS - 1]);
+    memmove(&ghidden[i], &ghidden[i + 1], (size_t)(GROWS - i - 1) * sizeof *ghidden);
+    memmove(&grow_scroll[i], &grow_scroll[i + 1], (size_t)(GROWS - i - 1) * sizeof *grow_scroll);
+    ngrows--;
+    if (sel_curve == i)
+        sel_curve = -1;
+    else if (sel_curve > i)
+        sel_curve--;
+    set_gfocus(gfocus >= i && gfocus > 0 ? gfocus - 1 : gfocus);
+}
+
+/* Re-reads every line. Cheap, so it runs every frame and picks up any change. */
+static void graph_update(void)
+{
+    char *texts[GROWS];
+    size_t total = 1;
+    for (int i = 0; i < ngrows; i++) {
+        texts[i] = ed_serialize(grows[i].root, &gempty[i]);
+        total += strlen(texts[i]) + 1;
+    }
+    char *sig = malloc(total);
+    if (!sig)
+        exit(1);
+    sig[0] = '\0';
+    for (int i = 0; i < ngrows; i++) {
+        strcat(sig, texts[i]);
+        strcat(sig, "\n");
+    }
+    if (!graph_sig || strcmp(sig, graph_sig) != 0) {
+        clear_key_point();   /* an edit makes a refined point stale */
+        free(graph_sig);
+        graph_sig = sig;
+    } else {
+        free(sig);
+    }
+    graph_build(&graph, &calc, texts, ngrows);
+    for (int i = 0; i < ngrows; i++)
+        free(texts[i]);
+    if (sel_curve >= graph.count || (sel_curve >= 0 && !graph.rows[sel_curve].plots))
+        sel_curve = -1;
+}
+
+static float to_sx(double x)
+{
+    return grect.x + grect.width / 2 + (float)((x - view_x) * view_scale);
+}
+
+static float to_sy(double y)
+{
+    return grect.y + grect.height / 2 - (float)((y - view_y) * view_scale);
+}
+
+static double to_wx(float px)
+{
+    return view_x + (px - (grect.x + grect.width / 2)) / view_scale;
+}
+
+static double to_wy(float py)
+{
+    return view_y - (py - (grect.y + grect.height / 2)) / view_scale;
+}
+
+/* Gridline spacing: 1, 2 or 5 times a power of ten, about `raw` apart. */
+static double nice_step(double raw, int *sub)
+{
+    double p = pow(10, floor(log10(raw))), m = raw / p;
+    if (m <= 1) {
+        *sub = 5;
+        return p;
+    }
+    if (m <= 2) {
+        *sub = 4;
+        return 2 * p;
+    }
+    if (m <= 5) {
+        *sub = 5;
+        return 5 * p;
+    }
+    *sub = 5;
+    return 10 * p;
+}
+
+static void format_number(char *buf, size_t n, double v, double step)
+{
+    if (fabs(v) < step * 1e-6)
+        v = 0;
+    double a = fabs(v);
+    if (a != 0 && (a >= 1e6 || a < 1e-4))
+        snprintf(buf, n, "%.3g", v);
+    else
+        snprintf(buf, n, "%.*f", step >= 1 ? 0 : (int)ceil(-log10(step) - 1e-9), v);
+}
+
+/* A short "(x, y)" for tooltips. */
+static void format_point(char *buf, size_t n, double x, double y)
+{
+    char xs[32], ys[32];
+    /* less than a hundredth of a pixel from zero is zero */
+    snprintf(xs, sizeof xs, "%.4g", fabs(x) * view_scale < 0.01 ? 0 : x);
+    snprintf(ys, sizeof ys, "%.4g", fabs(y) * view_scale < 0.01 ? 0 : y);
+    snprintf(buf, n, "(%s, %s)", xs, ys);
+}
+
+static void tooltip(const char *text, float px, float py)
+{
+    Vector2 t = MeasureTextEx(font, text, 15, 0);
+    float x = px + 10, y = py - t.y - 12;
+    if (x + t.x + 12 > grect.x + grect.width)
+        x = px - t.x - 22;
+    if (y < grect.y)
+        y = py + 12;
+    DrawRectangleRounded((Rectangle){x, y, t.x + 12, t.y + 8}, 0.3f, 6, (Color){12, 13, 16, 230});
+    DrawTextEx(font, text, (Vector2){x + 6, y + 4}, 15, 0, COL_TEXT);
+}
+
+static void draw_gridlines(void)
+{
+    int sub;
+    double step = nice_step(85 / view_scale, &sub);
+    double minor = step / sub;
+    double x0 = to_wx(grect.x), x1 = to_wx(grect.x + grect.width);
+    double y0 = to_wy(grect.y + grect.height), y1 = to_wy(grect.y);
+    Color c_minor = {255, 255, 255, 10}, c_major = {255, 255, 255, 28}, c_axis = {220, 222, 230, 170};
+
+    for (double x = ceil(x0 / minor) * minor; x <= x1; x += minor)
+        DrawLineV((Vector2){to_sx(x), grect.y}, (Vector2){to_sx(x), grect.y + grect.height}, c_minor);
+    for (double y = ceil(y0 / minor) * minor; y <= y1; y += minor)
+        DrawLineV((Vector2){grect.x, to_sy(y)}, (Vector2){grect.x + grect.width, to_sy(y)}, c_minor);
+    for (double x = ceil(x0 / step) * step; x <= x1; x += step)
+        DrawLineV((Vector2){to_sx(x), grect.y}, (Vector2){to_sx(x), grect.y + grect.height}, c_major);
+    for (double y = ceil(y0 / step) * step; y <= y1; y += step)
+        DrawLineV((Vector2){grect.x, to_sy(y)}, (Vector2){grect.x + grect.width, to_sy(y)}, c_major);
+
+    /* Axes, and numbers along them (kept on screen when an axis isn't). */
+    float ax = to_sx(0), ay = to_sy(0);
+    if (ax >= grect.x && ax <= grect.x + grect.width)
+        DrawLineEx((Vector2){ax, grect.y}, (Vector2){ax, grect.y + grect.height}, 1.5f, c_axis);
+    if (ay >= grect.y && ay <= grect.y + grect.height)
+        DrawLineEx((Vector2){grect.x, ay}, (Vector2){grect.x + grect.width, ay}, 1.5f, c_axis);
+    float ly = ay + 4 < grect.y + 4 ? grect.y + 4 : ay + 4 > grect.y + grect.height - 18 ? grect.y + grect.height - 18 : ay + 4;
+    float lx = ax - 6;
+    char buf[32];
+    for (double x = ceil(x0 / step) * step; x <= x1; x += step) {
+        if (fabs(x) < step / 2)
+            continue;
+        format_number(buf, sizeof buf, x, step);
+        Vector2 t = MeasureTextEx(font, buf, 13, 0);
+        DrawTextEx(font, buf, (Vector2){to_sx(x) - t.x / 2, ly}, 13, 0, COL_MUTED);
+    }
+    for (double y = ceil(y0 / step) * step; y <= y1; y += step) {
+        if (fabs(y) < step / 2)
+            continue;
+        format_number(buf, sizeof buf, y, step);
+        Vector2 t = MeasureTextEx(font, buf, 13, 0);
+        float x = lx - t.x;
+        if (x < grect.x + 4)
+            x = grect.x + 4;
+        if (x + t.x > grect.x + grect.width - 4)
+            x = grect.x + grect.width - 4 - t.x;
+        DrawTextEx(font, buf, (Vector2){x, to_sy(y) - t.y / 2}, 13, 0, COL_MUTED);
+    }
+    if (ax >= grect.x && ax <= grect.x + grect.width && ay >= grect.y && ay <= grect.y + grect.height)
+        DrawTextEx(font, "0", (Vector2){ax - 12, ay + 4}, 13, 0, COL_MUTED);
+}
+
+/*
+ * Is the curve continuous between two samples? Halving the interval toward
+ * the bigger change shrinks the gap for a continuous curve, but a jump
+ * (floor) or an asymptote (1/x) keeps it large.
+ */
+static int continuous(const GraphRow *r, double x0, double y0, double x1, double y1)
+{
+    double gap = fabs(y1 - y0);
+    for (int k = 0; k < 14; k++) {
+        double xm = (x0 + x1) / 2, ym = graph_y(r, xm);
+        if (isnan(ym))
+            return 0;
+        if (fabs(ym - y0) > fabs(y1 - ym)) {
+            x1 = xm;
+            y1 = ym;
+        } else {
+            x0 = xm;
+            y0 = ym;
+        }
+    }
+    return fabs(y1 - y0) < gap * 0.25;
+}
+
+static void draw_curve(int row, float thick)
+{
+    const GraphRow *r = &graph.rows[row];
+    Color col = curve_color(row);
+    float lim = grect.height * 4;
+    int pen = 0;
+    float px0 = 0, py0 = 0;
+    for (int i = 0; i < nsamples; i++) {
+        double y = samples[row][i];
+        if (isnan(y)) {
+            pen = 0;
+            continue;
+        }
+        float px = grect.x + (float)i, py = to_sy(y);
+        if (py < grect.y - lim)
+            py = grect.y - lim;
+        if (py > grect.y + grect.height + lim)
+            py = grect.y + grect.height + lim;
+        if (pen && (fabsf(py - py0) < 40 ||
+                    continuous(r, sample_x[i - 1], samples[row][i - 1], sample_x[i], y)))
+            DrawLineEx((Vector2){px0, py0}, (Vector2){px, py}, thick, col);
+        pen = 1;
+        px0 = px;
+        py0 = py;
+    }
+}
+
+static void add_key_point(PointKind kind, double x, double y, double lo, double hi, int row, int other)
+{
+    /* One dot per spot: the minimum at (0, -2) is also the y-intercept. */
+    for (int i = 0; i < nkps; i++)
+        if (fabs(kps[i].x - x) * view_scale < 1 && fabs(kps[i].y - y) * view_scale < 1)
+            return;
+    if (nkps < MAX_KEYPOINTS)
+        kps[nkps++] = (KeyPoint){x, y, lo, hi, kind, row, other};
+}
+
+/* f, or f - g for a crossing */
+static double key_f(int row, int other, double x)
+{
+    double y = graph_y(&graph.rows[row], x);
+    return other < 0 ? y : y - graph_y(&graph.rows[other], x);
+}
+
+/* Roots (other < 0) or crossings with curve `other`, from the samples. */
+static void find_sign_changes(int row, int other)
+{
+    for (int i = 1; i < nsamples; i++) {
+        double a = sample_x[i - 1], b = sample_x[i];
+        double fa = samples[row][i - 1] - (other < 0 ? 0 : samples[other][i - 1]);
+        double fb = samples[row][i] - (other < 0 ? 0 : samples[other][i]);
+        if (isnan(fa) || isnan(fb) || fb == 0 || (fa < 0) == (fb < 0))
+            continue;
+        double lo = a, hi = b, flo = fa;
+        for (int k = 0; k < 60; k++) {
+            double m = (lo + hi) / 2, fm = key_f(row, other, m);
+            if (isnan(fm))
+                break;
+            if ((fm < 0) == (flo < 0)) {
+                lo = m;
+                flo = fm;
+            } else {
+                hi = m;
+            }
+        }
+        double m = (lo + hi) / 2, fm = key_f(row, other, m);
+        /* A sign change through infinity (1/x at 0) isn't a root. */
+        if (!isnan(fm) && fabs(fm) <= 1e-7 * fmax(1, fmin(fabs(fa), fabs(fb))))
+            add_key_point(other < 0 ? PT_ROOT : PT_CROSS, m, other < 0 ? 0 : graph_y(&graph.rows[row], m), a, b,
+                          row, other);
+    }
+}
+
+static void find_key_points(void)
+{
+    nkps = 0;
+    if (sel_curve < 0 || !sampled[sel_curve])
+        return;
+    int row = sel_curve;
+    const GraphRow *r = &graph.rows[row];
+    find_sign_changes(row, -1);
+    for (int i = 0; i < nsamples; i++)   /* roots that touch zero exactly at a sample */
+        if (samples[row][i] == 0)
+            add_key_point(PT_ROOT, sample_x[i], 0, sample_x[i > 0 ? i - 1 : i],
+                          sample_x[i + 1 < nsamples ? i + 1 : i], row, -1);
+
+    /* Turning points: refine with a golden-section search. */
+    for (int i = 1; i + 1 < nsamples; i++) {
+        double a = samples[row][i - 1], b = samples[row][i], c = samples[row][i + 1];
+        if (isnan(a) || isnan(b) || isnan(c))
+            continue;
+        int is_max = b > a && b >= c, is_min = b < a && b <= c;
+        if (!is_max && !is_min)
+            continue;
+        double lo = sample_x[i - 1], hi = sample_x[i + 1];
+        const double g = 0.6180339887498949;
+        for (int k = 0; k < 80; k++) {
+            double m1 = hi - g * (hi - lo), m2 = lo + g * (hi - lo);
+            double f1 = graph_y(r, m1), f2 = graph_y(r, m2);
+            if ((f1 > f2) == is_max)
+                hi = m2;
+            else
+                lo = m1;
+        }
+        double x = (lo + hi) / 2;
+        add_key_point(is_max ? PT_MAX : PT_MIN, x, graph_y(r, x), sample_x[i - 1], sample_x[i + 1], row, -1);
+    }
+
+    double y0 = graph_y(r, 0);
+    if (!isnan(y0) && sample_x[0] <= 0 && sample_x[nsamples - 1] >= 0)
+        add_key_point(PT_YINT, 0, y0, 0, 0, row, -1);
+
+    for (int other = 0; other < graph.count; other++)
+        if (other != row && sampled[other])
+            find_sign_changes(row, other);
+}
+
+static const char *kind_name(PointKind k)
+{
+    switch (k) {
+    case PT_ROOT:
+        return "Root";
+    case PT_MAX:
+        return "Maximum";
+    case PT_MIN:
+        return "Minimum";
+    case PT_CROSS:
+        return "Intersection";
+    default:
+        return "y-intercept";
+    }
+}
+
+/* Clicking a key point: pin it down with the exact engine. */
+static void select_key_point(const KeyPoint *k)
+{
+    clear_key_point();
+    kp_sel = *k;
+    kp_selected = 1;
+    if (graph_exact_point(&calc, &graph, k->row, k->other, k->kind, k->lo, k->hi, &kp_x, &kp_y) != 0) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "\xE2\x89\x88 %.15g", k->x);
+        kp_x = dup(buf);
+        snprintf(buf, sizeof buf, "\xE2\x89\x88 %.15g", k->y);
+        kp_y = dup(buf);
+    }
+}
+
+static void copy_key_point(void)
+{
+    if (!kp_selected)
+        return;
+    size_t n = strlen(kp_x) + strlen(kp_y) + 8;
+    char *s = malloc(n);
+    if (!s)
+        exit(1);
+    snprintf(s, n, "(%s, %s)", kp_x, kp_y);
+    SetClipboardText(s);
+    free(s);
+}
+
+static void zoom_at(float px, float py, double factor)
+{
+    double wx = to_wx(px), wy = to_wy(py);
+    view_scale *= factor;
+    if (view_scale < 1e-6)
+        view_scale = 1e-6;
+    if (view_scale > 1e12)
+        view_scale = 1e12;
+    view_x = wx - (px - (grect.x + grect.width / 2)) / view_scale;
+    view_y = wy + (py - (grect.y + grect.height / 2)) / view_scale;
+}
+
+static void draw_graph(Rectangle area)
+{
+    grect = area;
+    DrawRectangleRec(area, ColorBrightness(COL_SCREEN, -0.15f));
+    Vector2 m = GetMousePosition();
+    int inside = CheckCollisionPointRec(m, area);
+
+    /* zoom buttons, top right */
+    Rectangle zb[3];
+    for (int i = 0; i < 3; i++)
+        zb[i] = (Rectangle){area.x + area.width - 40, area.y + 10 + (float)i * 36, 30, 30};
+    int over_buttons = CheckCollisionPointRec(m, (Rectangle){zb[0].x, zb[0].y, 30, 102});
+
+    /* panning and zooming */
+    if (inside && !over_buttons && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && slider_drag < 0) {
+        panning = 1;
+        pan_moved = 0;
+        pan_from = m;
+    }
+    if (panning) {
+        Vector2 d = {m.x - pan_from.x, m.y - pan_from.y};
+        if (fabsf(d.x) + fabsf(d.y) > 3)
+            pan_moved = 1;
+        if (pan_moved) {
+            view_x -= d.x / view_scale;
+            view_y += d.y / view_scale;
+            pan_from = m;
+        }
+    }
+    if (inside && GetMouseWheelMove() != 0)
+        zoom_at(m.x, m.y, pow(1.15, GetMouseWheelMove()));
+
+    /* sample every curve once per pixel column */
+    nsamples = (int)area.width < MAX_SAMPLES ? (int)area.width : MAX_SAMPLES;
+    for (int i = 0; i < nsamples; i++)
+        sample_x[i] = to_wx(area.x + (float)i);
+    for (int row = 0; row < graph.count; row++) {
+        sampled[row] = graph.rows[row].plots && !ghidden[row];
+        if (sampled[row])
+            for (int i = 0; i < nsamples; i++)
+                samples[row][i] = graph_y(&graph.rows[row], sample_x[i]);
+    }
+
+    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    draw_gridlines();
+    for (int row = 0; row < graph.count; row++)
+        if (sampled[row])
+            draw_curve(row, row == sel_curve ? 3.5f : 2.5f);
+
+    /* key points of the selected curve */
+    find_key_points();
+    int hover_kp = -1;
+    for (int i = 0; i < nkps; i++) {
+        float px = to_sx(kps[i].x), py = to_sy(kps[i].y);
+        if (fabsf(px - m.x) < 8 && fabsf(py - m.y) < 8)
+            hover_kp = i;
+        DrawCircleV((Vector2){px, py}, 5.5f, (Color){20, 22, 26, 255});
+        DrawCircleV((Vector2){px, py}, 4, (Color){175, 178, 188, 255});
+    }
+    if (kp_selected) {
+        float px = to_sx(kp_sel.x), py = to_sy(kp_sel.y);
+        DrawCircleV((Vector2){px, py}, 7, curve_color(kp_sel.row));
+        DrawCircleV((Vector2){px, py}, 3.5f, COL_TEXT);
+    }
+
+    /* tracing: a dot on the curve nearest the mouse */
+    int trace_row = -1;
+    double trace_x = 0, trace_y = 0;
+    if (inside && !over_buttons && !pan_moved && hover_kp < 0) {
+        float best = 12;
+        double wx = to_wx(m.x);
+        for (int row = 0; row < graph.count; row++) {
+            if (!sampled[row])
+                continue;
+            double y = graph_y(&graph.rows[row], wx);
+            if (!isnan(y) && fabsf(to_sy(y) - m.y) < best) {
+                best = fabsf(to_sy(y) - m.y);
+                trace_row = row;
+                trace_x = wx;
+                trace_y = y;
+            }
+        }
+    }
+    char buf[96];
+    if (hover_kp >= 0) {
+        any_hover = 1;
+        char pt[80];
+        format_point(pt, sizeof pt, kps[hover_kp].x, kps[hover_kp].y);
+        snprintf(buf, sizeof buf, "%s %s", kind_name(kps[hover_kp].kind), pt);
+        tooltip(buf, to_sx(kps[hover_kp].x), to_sy(kps[hover_kp].y));
+    } else if (trace_row >= 0) {
+        DrawCircleV((Vector2){to_sx(trace_x), to_sy(trace_y)}, 5, curve_color(trace_row));
+        format_point(buf, sizeof buf, trace_x, trace_y);
+        tooltip(buf, to_sx(trace_x), to_sy(trace_y));
+    }
+
+    /* a click (not a drag): pick a key point, a curve, or nothing */
+    if (panning && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        if (!pan_moved && inside && !over_buttons) {
+            if (hover_kp >= 0) {
+                select_key_point(&kps[hover_kp]);
+            } else if (trace_row >= 0) {
+                sel_curve = trace_row;
+                gfocus = trace_row;
+                cur = &grows[gfocus];
+                clear_key_point();
+            } else {
+                sel_curve = -1;
+                clear_key_point();
+            }
+        }
+        panning = 0;
+    }
+
+    /* the selected key point in full, bottom left */
+    if (kp_selected) {
+        char lines[3][160];
+        snprintf(lines[0], sizeof lines[0], "%s", kind_name(kp_sel.kind));
+        /* "x = 2", or "x ≈ 1.414..." for an approximate value */
+        int ax = strncmp(kp_x, "\xE2\x89\x88 ", 4) == 0, ay = strncmp(kp_y, "\xE2\x89\x88 ", 4) == 0;
+        snprintf(lines[1], sizeof lines[1], "x %s %s", ax ? "\xE2\x89\x88" : "=", kp_x + (ax ? 4 : 0));
+        snprintf(lines[2], sizeof lines[2], "y %s %s", ay ? "\xE2\x89\x88" : "=", kp_y + (ay ? 4 : 0));
+        float w = 0;
+        for (int i = 0; i < 3; i++)
+            w = maxf(w, MeasureTextEx(font, lines[i], i ? 16 : 14, 0).x);
+        Rectangle box = {area.x + 10, area.y + area.height - 74, w + 20, 64};
+        DrawRectangleRounded(box, 0.15f, 6, (Color){12, 13, 16, 235});
+        DrawRectangleRec((Rectangle){box.x, box.y + 8, 3, box.height - 16}, curve_color(kp_sel.row));
+        DrawTextEx(font, lines[0], (Vector2){box.x + 10, box.y + 6}, 14, 0, COL_MUTED);
+        DrawTextEx(font, lines[1], (Vector2){box.x + 10, box.y + 24}, 16, 0, COL_TEXT);
+        DrawTextEx(font, lines[2], (Vector2){box.x + 10, box.y + 43}, 16, 0, COL_TEXT);
+    }
+    EndScissorMode();
+
+    const char *zl[] = {"+", "\xE2\x88\x92", "\xE2\x8C\x82"};
+    for (int i = 0; i < 3; i++) {
+        if (text_button(zb[i], zl[i], COL_FN, 18)) {
+            if (i == 2) {
+                view_x = view_y = 0;
+                view_scale = 50;
+            } else {
+                zoom_at(area.x + area.width / 2, area.y + area.height / 2, i == 0 ? 1.5 : 1 / 1.5);
+            }
+        }
+    }
+}
+
+/* A slider under a line like "a = 2"; dragging it rewrites the line. */
+static void draw_slider(int i, Rectangle r)
+{
+    GraphRow *g = &graph.rows[i];
+    double v = g->value;
+    double lo = v < -10 ? floor(v) : -10, hi = v > 10 ? ceil(v) : 10;
+    float t = (float)((v - lo) / (hi - lo));
+    Rectangle track = {r.x + 30, r.y + r.height / 2 - 2, r.width - 60, 4};
+    char buf[64];
+    format_number(buf, sizeof buf, lo, 1);
+    DrawTextEx(font, buf, (Vector2){r.x, r.y + 3}, 12, 0, COL_MUTED);
+    format_number(buf, sizeof buf, hi, 1);
+    DrawTextEx(font, buf, (Vector2){track.x + track.width + 6, r.y + 3}, 12, 0, COL_MUTED);
+    DrawRectangleRounded(track, 1, 4, COL_BOX);
+    DrawRectangleRounded((Rectangle){track.x, track.y, track.width * t, 4}, 1, 4, curve_color(i));
+    Vector2 knob = {track.x + track.width * t, track.y + 2};
+    DrawCircleV(knob, 8, curve_color(i));
+    DrawCircleV(knob, 4, COL_TEXT);
+
+    Vector2 m = GetMousePosition();
+    Rectangle hit = {track.x - 8, r.y, track.width + 16, r.height};
+    if (CheckCollisionPointRec(m, hit)) {
+        any_hover = 1;
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            slider_drag = i;
+    }
+    if (slider_drag == i) {
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            slider_drag = -1;
+            return;
+        }
+        double nt = (m.x - track.x) / track.width;
+        nt = nt < 0 ? 0 : nt > 1 ? 1 : nt;
+        double step = pow(10, floor(log10((hi - lo) / 100)));
+        double nv = round((lo + nt * (hi - lo)) / step) * step;
+        char line[96];
+        snprintf(line, sizeof line, "%s=%.*f", g->name, step >= 1 ? 0 : (int)ceil(-log10(step) - 1e-9), nv);
+        if (strcmp(line + strlen(g->name) + 1, "-0") == 0)
+            snprintf(line, sizeof line, "%s=0", g->name);
+        ed_clear(&grows[i]);
+        ed_insert_text(&grows[i], line);
+    }
+}
+
+static int has_definition(const char *name)
+{
+    for (int i = 0; i < graph.count; i++)
+        if (graph.rows[i].name && strcmp(graph.rows[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+static void draw_list(Rectangle area)
+{
+    DrawRectangleRec(area, COL_SCREEN);
+    if (CheckCollisionPointRec(GetMousePosition(), area))
+        list_scroll -= GetMouseWheelMove() * 30;
+    if (list_scroll < 0)
+        list_scroll = 0;
+
+    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    float y = area.y + 8 - list_scroll, x = area.x + 8, w = area.width - 16;
+    char buf[160];
+    for (int i = 0; i < ngrows; i++) {
+        GraphRow *g = i < graph.count ? &graph.rows[i] : NULL;
+        Box b = measure(grows[i].root, 22);
+        float h = maxf(38, b.asc + b.desc + 10);
+
+        /* color dot: click to show or hide the curve */
+        Vector2 dot = {x + 10, y + h / 2};
+        if (g && g->plots) {
+            if (ghidden[i])
+                DrawCircleLines((int)dot.x, (int)dot.y, 7, curve_color(i));
+            else
+                DrawCircleV(dot, 7, curve_color(i));
+            if (CheckCollisionPointCircle(GetMousePosition(), dot, 10)) {
+                any_hover = 1;
+                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+                    ghidden[i] = !ghidden[i];
+            }
+        } else {
+            snprintf(buf, sizeof buf, "%d", i + 1);
+            DrawTextEx(font, buf, (Vector2){x + 5, y + h / 2 - 7}, 13, 0, COL_MUTED);
+        }
+
+        Rectangle field = {x + 24, y, w - 24 - (ngrows > 1 ? 28 : 0), h};
+        const char *ph = i == ngrows - 1 && ngrows == 1 ? "type y = x^2, a = 2, ..." : NULL;
+        if (editor_box(&grows[i], &grow_scroll[i], gfocus == i, field, 22, ph)) {
+            set_gfocus(i);
+            clear_key_point();
+        }
+        if (ngrows > 1) {
+            Rectangle del = {field.x + field.width + 4, y + h / 2 - 12, 24, 24};
+            if (text_button(del, "\xC3\x97", COL_SCREEN, 18)) {
+                remove_grow(i);
+                break;   /* the list changed under us; draw it next frame */
+            }
+        }
+        y += h + 4;
+
+        if (!g)
+            continue;
+        int show_error = g->kind == GR_ERROR && !(gfocus == i && gempty[i]);
+        if (g->kind == GR_SLIDER) {
+            draw_slider(i, (Rectangle){field.x, y, field.width, 22});
+            y += 26;
+        } else if (g->kind == GR_VALUE || g->kind == GR_VAR) {
+            snprintf(buf, sizeof buf, "= %.10g", g->value);
+            Vector2 t = MeasureTextEx(font, buf, 15, 0);
+            DrawTextEx(font, buf, (Vector2){field.x + field.width - t.x - 6, y}, 15, 0, COL_MUTED);
+            y += 20;
+        }
+        const char *const *unknown;
+        int nu = graph_unknowns(g, &unknown);
+        if (nu > 0) {
+            DrawTextEx(font, "add slider:", (Vector2){field.x + 2, y + 5}, 13, 0, COL_MUTED);
+            float cx = field.x + 92;
+            for (int k = 0; k < nu; k++) {
+                if (eval_is_reserved(unknown[k]) || has_definition(unknown[k]))
+                    continue;
+                float cw = tw(unknown[k], 15) + 18;
+                if (text_button((Rectangle){cx, y, cw, 22}, unknown[k], COL_TOGGLE, 15)) {
+                    snprintf(buf, sizeof buf, "%s=1", unknown[k]);
+                    add_grow(buf);
+                }
+                cx += cw + 6;
+            }
+            y += 26;
+        }
+        if (show_error) {
+            snprintf(buf, sizeof buf, "%s", g->error);
+            char *at = strstr(buf, " (at column");   /* too long for the list */
+            if (at)
+                *at = '\0';
+            DrawTextEx(font, buf, (Vector2){field.x + 2, y}, 13, 0, COL_ERROR);
+            y += 18;
+        }
+        y += 4;
+    }
+    if (ngrows < GROWS) {
+        Rectangle add = {x + 24, y + 2, 120, 26};
+        if (text_button(add, "+ add line", COL_FN, 14)) {
+            add_grow("");
+            set_gfocus(ngrows - 1);
+        }
+        y += 34;
+    }
+    EndScissorMode();
+    float content = y + list_scroll - area.y;
+    if (list_scroll > content - area.height + 20)
+        list_scroll = content - area.height + 20 > 0 ? content - area.height + 20 : 0;
+}
+
+static void draw_graph_tab(Rectangle area)
+{
+    graph_update();
+    if (area.width >= 700) {   /* side by side */
+        float lw = 320;
+        draw_list((Rectangle){area.x, area.y, lw, area.height});
+        draw_graph((Rectangle){area.x + lw + GAP, area.y, area.width - lw - GAP, area.height});
+    } else {                   /* the list above the graph */
+        float lh = area.height * 0.38f;
+        draw_list((Rectangle){area.x, area.y, area.width, lh});
+        draw_graph((Rectangle){area.x, area.y + lh + GAP, area.width, area.height - lh - GAP});
+    }
+}
+
+static void graph_key(int key)
+{
+    switch (key) {
+    case KEY_ENTER:
+    case KEY_KP_ENTER:
+        /* next line, starting a new one after the last */
+        if (gfocus == ngrows - 1 && !ed_is_empty(cur) && ngrows < GROWS)
+            add_grow("");
+        set_gfocus(gfocus + 1);
+        break;
+    case KEY_BACKSPACE:
+    case KEY_DELETE:
+        if (ed_is_empty(cur) && ngrows > 1) {
+            remove_grow(gfocus);
+            ed_end(cur);
+        } else {
+            ed_backspace(cur);
+        }
+        break;
+    case KEY_LEFT:
+        ed_left(cur);
+        break;
+    case KEY_RIGHT:
+        ed_right(cur);
+        break;
+    case KEY_HOME:
+        ed_home(cur);
+        break;
+    case KEY_END:
+        ed_end(cur);
+        break;
+    case KEY_UP:
+    case KEY_DOWN: {
+        int dir = key == KEY_UP ? -1 : 1;
+        if (!ed_vertical(cur, dir))
+            set_gfocus(gfocus + dir);
+        break;
+    }
+    case KEY_TAB: {
+        int dir = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ? -1 : 1;
+        Row *row = cur->row;
+        int pos = cur->pos;
+        ed_tab(cur, dir);
+        if (cur->row == row && cur->pos == pos)
+            set_gfocus(gfocus + dir);
+        break;
+    }
+    case KEY_ESCAPE:
+        if (kp_selected)
+            clear_key_point();
+        else if (sel_curve >= 0)
+            sel_curve = -1;
+        else
+            ed_clear(cur);
+        break;
+    }
+}
+
 /* ---- Main ------------------------------------------------------------------------ */
 
 static Font load_font(void)
@@ -1479,7 +2351,7 @@ static Font load_font(void)
         "abcdefghijklmnopqrstuvwxyz{|}~"
         "\xE2\x89\x88\xCF\x80\xCE\xA3\xCE\xA0\xE2\x88\x91\xE2\x88\x8F\xE2\x88\x9A"
         "\xC3\xB7\xC3\x97\xE2\x88\x92\xE2\x8C\xAB\xCA\xB8\xE2\x80\xA6\xE2\x81\xBB\xC2\xB9"
-        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7\xE2\x86\x90\xE2\x86\x91\xE2\x86\x93";
+        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7\xE2\x86\x90\xE2\x86\x91\xE2\x86\x93\xE2\x8C\x82";
     int count;
     int *cps = LoadCodepoints(chars, &count);
 
@@ -1517,6 +2389,8 @@ int main(void)
     ed_insert_text(&fields[FIELD_START], "1");   /* Casio's defaults */
     ed_insert_text(&fields[FIELD_END], "5");
     ed_insert_text(&fields[FIELD_STEP], "1");
+    for (int i = 0; i < GROWS; i++)
+        ed_init(&grows[i]);
     make_icons();
 
     while (!WindowShouldClose()) {
@@ -1524,12 +2398,13 @@ int main(void)
 
         float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
         int in_view = tab == TAB_TABLE && table_view;
-        int no_keys = text_mode || in_view;   /* typing only: room for a hint, no buttons */
+        int no_keys = text_mode || in_view || tab == TAB_GRAPH;   /* typing only: room for a hint */
         float keys_h = no_keys ? 40 : H * 0.6f;
         Rectangle tabs = {PAD, PAD - 4, W - 2 * PAD, 30};
         float top = tabs.y + tabs.height + 6;
         Rectangle screen = {PAD, top, W - 2 * PAD, H - keys_h - MODEBAR_H - 2 * PAD - top};
-        Rectangle modebar = {PAD, screen.y + screen.height + PAD, W - 2 * PAD, MODEBAR_H};
+        Rectangle modebar = {PAD, screen.y + screen.height + PAD, W - 2 * PAD > 700 ? 700 : W - 2 * PAD,
+                             MODEBAR_H};
         float gy = modebar.y + MODEBAR_H + PAD;
         float fn_h = (H - gy - PAD) * 0.53f;   /* 5 rows of functions over 4 of numbers */
         Rectangle fn_area = {PAD, gy, W - 2 * PAD, fn_h};
@@ -1541,6 +2416,8 @@ int main(void)
         draw_tabs(tabs);
         if (tab == TAB_CALC)
             draw_screen(screen);
+        else if (tab == TAB_GRAPH)
+            draw_graph_tab(screen);
         else if (table_view)
             draw_table_view(screen);
         else
@@ -1555,7 +2432,11 @@ int main(void)
                 "\xE2\x86\x91\xE2\x86\x93 \xE2\x86\x90\xE2\x86\x92 move \xC2\xB7 wheel scrolls \xC2\xB7 click a cell",
                 "Esc or Enter: back to the setup \xC2\xB7 Copy: the selected cell",
             };
-            const char **hint = in_view ? table_hint : text_hint;
+            const char *graph_hint[] = {
+                "drag: pan \xC2\xB7 scroll: zoom \xC2\xB7 click a curve, then a dot, for key points",
+                "Enter: new line \xC2\xB7 y = ..., a = 2 (slider), f(x) = ... \xC2\xB7 sum sqrt pi \xE2\x86\x92 templates",
+            };
+            const char **hint = tab == TAB_GRAPH ? graph_hint : in_view ? table_hint : text_hint;
             for (int i = 0; i < 2; i++)
                 DrawTextEx(font, hint[i], (Vector2){PAD + 4, gy - 2 + (float)i * 17}, 13, 0, COL_MUTED);
         } else {
@@ -1575,6 +2456,11 @@ int main(void)
         ed_free(&fields[i]);
     clear_cells();
     table_free(&table);
+    for (int i = 0; i < GROWS; i++)
+        ed_free(&grows[i]);
+    graph_free(&graph);
+    clear_key_point();
+    free(graph_sig);
     calc_free(&calc);
     if (font.texture.id != GetFontDefault().texture.id)
         UnloadFont(font);

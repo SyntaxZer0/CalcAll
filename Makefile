@@ -2,7 +2,8 @@ CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -O2
 LDLIBS = -lm
 
-ENGINE = src/bigint.c src/rational.c src/approx.c src/cmath.c src/parser.c src/eval.c src/symbols.c src/calc.c
+ENGINE = src/bigint.c src/rational.c src/approx.c src/cmath.c src/parser.c src/eval.c src/symbols.c src/calc.c \
+         src/feval.c src/graph.c
 HDR = $(wildcard src/*.h)
 
 calc: $(ENGINE) src/main.c $(HDR)
@@ -32,14 +33,18 @@ calc-gui: $(ENGINE) src/mathedit.c src/gui.c $(HDR)
 	    exit 1; }
 	$(CC) $(CFLAGS) $(RAYLIB_CFLAGS) -o $@ $(ENGINE) src/mathedit.c src/gui.c $(RAYLIB_LIBS) $(GUI_SYSLIBS) $(LDLIBS)
 
-test: calc tests/mathedit_test
+test: calc tests/mathedit_test tests/graph_test
 	sh tests/run_tests.sh ./calc
 	./tests/mathedit_test
+	CALC_DEFINITIONS= ./tests/graph_test
+
+tests/graph_test: tests/graph_test.c $(ENGINE) $(HDR)
+	$(CC) $(CFLAGS) -o $@ tests/graph_test.c $(ENGINE) $(LDLIBS)
 
 tests/mathedit_test: tests/mathedit_test.c $(ENGINE) src/mathedit.c $(HDR)
 	$(CC) $(CFLAGS) -o $@ tests/mathedit_test.c $(ENGINE) src/mathedit.c $(LDLIBS)
 
 clean:
-	rm -f calc calc-gui tests/mathedit_test
+	rm -f calc calc-gui tests/mathedit_test tests/graph_test
 
 .PHONY: gui test clean

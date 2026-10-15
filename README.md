@@ -83,6 +83,23 @@ Cells that can't be computed, like 1/x at 0, show ERROR. In the terminal,
 `:table x^2 + 1 from 1 to 5 step 1` prints the same thing (add `; g(x)` after
 f(x) for a second column).
 
+The **Graph** tab works like Desmos. Type one line per expression: `y = x^2`,
+`sin(x)` or `f(x) = ...` draws a curve in its own color, `a = 2` makes a
+slider, and a line that uses an undefined name like `y = ax + 1` offers an
+"add slider" button for it. Drag to pan, scroll to zoom (the buttons at the
+top right zoom too, and ⌂ goes back to the start), and hover over a curve to
+trace it. Click a curve to show dots at its roots, turning points,
+y-intercept and crossings with other curves; click a dot and the exact engine
+pins it down to full precision, exactly when it can (the minimum of
+x^2 - 2x + 3 is exactly (1, 2); a root of x^2 - 2 is √2 to every digit). The
+window widens the first time you open the Graph tab, and the list sits beside
+the graph when there's room.
+
+Curves are drawn with a fast floating-point evaluator so panning stays
+smooth; asymptotes (1/x, tan x) and jumps (floor x) are left as gaps instead
+of being joined up. Graph lines can use your own variables and functions,
+and their own definitions stay local to the graph.
+
 Run it from the repository folder, or keep the `assets` folder next to
 `calc-gui`, so it can find its font.
 
@@ -141,6 +158,8 @@ src/cmath.c     complex arithmetic and complex exp, ln, sqrt, sin, cos, ...
 src/parser.c    text -> expression tree (recursive descent)
 src/eval.c      walks the tree; tracks exact vs approximate; all functions
 src/symbols.c   the table of user variables and functions
+src/feval.c     fast floating-point evaluation for drawing graphs
+src/graph.c     the graph's expression list, and exact key points
 src/calc.c      the engine API a front end calls: calc_eval(line) -> text
 src/main.c      the terminal front end
 src/mathedit.c  the natural-display editor: templates, cursor, to-text
