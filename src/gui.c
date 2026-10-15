@@ -94,6 +94,8 @@ static Table table;
 static int sel_row, sel_col;       /* selected cell; col 0 is x, 1 is f, 2 is g */
 static int table_top;              /* first row on screen */
 static char table_error[300];
+static char goto_text[32];         /* the table's "go to" box: a row number, or x=value */
+static int goto_bad;               /* what's in it matches no row */
 static Editor *cur = &ed;          /* the editor that keys and buttons type into */
 
 /* ---- Text helpers ------------------------------------------------------------ */
@@ -1145,6 +1147,7 @@ static void draw_modebar(Rectangle area)
 /* ---- Keyboard ------------------------------------------------------------------- */
 
 static void table_key(int key);
+static void goto_type(int cp);
 static void set_focus(int f);
 
 static void graph_key(int key);
@@ -1249,8 +1252,12 @@ static void handle_keys(void)
 
     int cp;
     while ((cp = GetCharPressed()) > 0) {
-        if (mod || cp == ' ' || (tab == TAB_TABLE && table_view))
+        if (mod || cp == ' ')
             continue;
+        if (tab == TAB_TABLE && table_view) {
+            goto_type(cp);
+            continue;
+        }
         show_history = 0;   /* typing goes back to the calculation */
         if (text_mode || tab == TAB_GRAPH) {   /* the graph has no keypad: words make templates */
             int n;
@@ -1402,6 +1409,8 @@ static void build_table(void)
             sel_row = 0;
             sel_col = 1;
             table_top = 0;
+            goto_text[0] = '\0';
+            goto_bad = 0;
         }
     }
     for (int i = 0; i < NFIELDS; i++)
@@ -1417,9 +1426,77 @@ static void table_enter(void)
         build_table();
 }
 
+/* Typing in the table goes to the "go to" box. */
+static void goto_type(int cp)
+{
+    size_t n = strlen(goto_text);
+    if (cp == 'X')
+        cp = 'x';
+    if (n + 1 >= sizeof goto_text || cp > 127 || !strchr("0123456789.-+x=", cp))
+        return;
+    goto_text[n] = (char)cp;
+    goto_text[n + 1] = '\0';
+    goto_bad = 0;
+}
+
+/*
+ * Jumps to what the "go to" box names: "25" is the 25th row, and "x=2.5"
+ * (or "x2.5") the row whose x is closest to 2.5. Returns 0 if nothing matches.
+ */
+static int goto_jump(void)
+{
+    char *end;
+    if (goto_text[0] == 'x') {
+        const char *p = goto_text + 1;
+        if (*p == '=')
+            p++;
+        double want = strtod(p, &end);
+        if (end == p || *end || table.count == 0)
+            return 0;
+        int best = 0;
+        double best_d = HUGE_VAL;
+        for (int i = 0; i < table.count; i++) {
+            double d = fabs(rat_to_double(&table.rows[i].x.r) - want);
+            if (d < best_d) {
+                best_d = d;
+                best = i;
+            }
+        }
+        sel_row = best;
+        return 1;
+    }
+    long n = strtol(goto_text, &end, 10);
+    if (end == goto_text || *end || n < 1 || n > table.count)
+        return 0;
+    sel_row = (int)n - 1;
+    return 1;
+}
+
 static void table_key(int key)
 {
     int cols = table.has_g ? 3 : 2;
+    if (goto_text[0]) {   /* editing the "go to" box */
+        switch (key) {
+        case KEY_ENTER:
+        case KEY_KP_ENTER:
+            if (goto_jump()) {
+                goto_text[0] = '\0';
+                table_top = sel_row;   /* show it at the top of the list */
+            } else {
+                goto_bad = 1;
+            }
+            return;
+        case KEY_BACKSPACE:
+        case KEY_DELETE:
+            goto_text[strlen(goto_text) - 1] = '\0';
+            goto_bad = 0;
+            return;
+        case KEY_ESCAPE:
+            goto_text[0] = '\0';
+            goto_bad = 0;
+            return;
+        }
+    }
     switch (key) {
     case KEY_UP:
         sel_row--;
@@ -1660,6 +1737,22 @@ static void draw_table_view(Rectangle area)
     char head[96];
     snprintf(head, sizeof head, "%s  \xC2\xB7  row %d of %d", label, sel_row + 1, table.count);
     DrawTextEx(font, head, (Vector2){x, dy + 6}, 14, 0, COL_MUTED);
+
+    /* The "go to" box: type a row number (or x=value) and press Enter. */
+    float gw = 150, gx = x + w - gw;
+    Rectangle gbox = {gx, dy + 3, gw, 19};
+    DrawRectangleRounded(gbox, 0.3f, 6, ColorBrightness(COL_SCREEN, -0.25f));
+    if (goto_text[0])
+        DrawRectangleRoundedLinesEx(gbox, 0.3f, 6, 1.2f, goto_bad ? COL_ERROR : COL_CURSOR);
+    const char *gl = "Go to ";
+    DrawTextEx(font, gl, (Vector2){gx - tw(gl, 13), dy + 6}, 13, 0, COL_MUTED);
+    if (goto_text[0]) {
+        DrawTextEx(font, goto_text, (Vector2){gx + 6, dy + 5}, 14, 0, goto_bad ? COL_ERROR : COL_TEXT);
+        if (((int)(GetTime() * 2.5)) % 2 == 0)
+            DrawRectangleRec((Rectangle){gx + 7 + tw(goto_text, 14), dy + 6, 1.5f, 14}, COL_CURSOR);
+    } else {
+        DrawTextEx(font, "row or x=value", (Vector2){gx + 6, dy + 6}, 13, 0, COL_MUTED);
+    }
     Rectangle detail = {x, dy + 22, w, detail_h - 28};
     const char *error;
     const Value *v = cell_value(sel_row, sel_col, &error);
@@ -2967,7 +3060,7 @@ int main(void)
             };
             const char *table_hint[] = {
                 "\xE2\x86\x91\xE2\x86\x93 \xE2\x86\x90\xE2\x86\x92 move \xC2\xB7 wheel scrolls \xC2\xB7 click a cell",
-                "Esc or Enter: back to the setup \xC2\xB7 Copy: the selected cell",
+                "type a row (or x=2.5) + Enter: jump there \xC2\xB7 Esc: back to the setup",
             };
             const char *graph_hint[] = {
                 "drag: pan \xC2\xB7 scroll: zoom \xC2\xB7 click a curve, then a dot, for key points",

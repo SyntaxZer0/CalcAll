@@ -85,6 +85,8 @@ like, g(x), then Start, End and Step (expressions such as `pi/4` are fine),
 and press Enter on Step or the Table button. Tables can have up to 1000 rows;
 x goes up exactly, so a step of 0.1 never drifts. Arrow keys or clicks select
 a cell, and its full-precision value shows at the bottom (Copy copies it).
+To jump through a long table, just type a row number (or `x=2.5` for the row
+whose x is closest) into the Go to box and press Enter.
 Cells that can't be computed, like 1/x at 0, show ERROR. In the terminal,
 `:table x^2 + 1 from 1 to 5 step 1` prints the same thing (add `; g(x)` after
 f(x) for a second column).
