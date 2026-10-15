@@ -40,6 +40,22 @@ make            # builds ./calc
 make test       # run the tests
 ```
 
+### GUI
+
+The GUI uses [raylib](https://www.raylib.com). On macOS:
+
+```sh
+brew install raylib pkg-config
+make gui
+./calc-gui
+```
+
+Type expressions or use the buttons. Enter evaluates, Up/Down recalls earlier
+input, Esc clears, and Cmd+C copies the last result. Click an earlier line to
+edit it again. Starting a line with an operator continues from the last
+answer (`+ 1` means `ans + 1`). Run it from the repository folder, or keep
+the `assets` folder next to `calc-gui`, so it can find its font.
+
 ## What it understands
 
 | | |
@@ -69,7 +85,10 @@ src/parser.c    text -> expression tree (recursive descent)
 src/eval.c      walks the tree; tracks exact vs approximate; all functions
 src/calc.c      the engine API a front end calls: calc_eval(line) -> text
 src/main.c      the terminal front end
+src/gui.c       the raylib front end
 ```
 
-A GUI is a new front end that calls `calc_eval` from `calc.h`, just as
-`main.c` does.
+Both front ends only use `calc.h`: they pass a line of text to `calc_eval`
+and show the text it returns.
+
+The bundled font is DejaVu Sans Mono; see `assets/DejaVu-LICENSE.txt`.
