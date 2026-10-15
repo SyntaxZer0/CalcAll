@@ -40,6 +40,7 @@ typedef struct {
 /* Accepted spellings for the big operators, including Unicode Σ ∑ Π ∏. */
 static const char *const SUM_NAMES[] = {"sum", "\xCE\xA3", "\xE2\x88\x91", NULL};
 static const char *const PROD_NAMES[] = {"prod", "product", "\xCE\xA0", "\xE2\x88\x8F", NULL};
+static const char *const INT_NAMES[] = {"int", "integral", "\xE2\x88\xAB", NULL};   /* ∫ */
 
 static void fail(Parser *P, const char *fmt, ...)
 {
@@ -149,7 +150,7 @@ static char *tok_dup(const Token *t)
     return s;
 }
 
-static Node *new_node(NodeKind kind, size_t nargs)
+Node *node_new(NodeKind kind, size_t nargs)
 {
     Node *n = calloc(1, sizeof *n);
     if (!n || (nargs && !(n->args = calloc(nargs, sizeof *n->args)))) {
@@ -160,6 +161,40 @@ static Node *new_node(NodeKind kind, size_t nargs)
     n->nargs = nargs;
     rat_init(&n->value);
     return n;
+}
+
+static char *str_dup(const char *s)
+{
+    char *d = malloc(strlen(s) + 1);
+    if (!d) {
+        fputs("calc: out of memory\n", stderr);
+        exit(1);
+    }
+    return strcpy(d, s);
+}
+
+Node *node_clone(const Node *n)
+{
+    if (!n)
+        return NULL;
+    Node *c = node_new(n->kind, n->nargs);
+    c->op = n->op;
+    rat_copy(&c->value, &n->value);
+    c->name = n->name ? str_dup(n->name) : NULL;
+    c->text = n->text ? str_dup(n->text) : NULL;
+    for (size_t i = 0; i < n->nargs; i++)
+        c->args[i] = node_clone(n->args[i]);
+    if (n->nparams) {
+        c->params = malloc(n->nparams * sizeof *c->params);
+        if (!c->params) {
+            fputs("calc: out of memory\n", stderr);
+            exit(1);
+        }
+        for (size_t i = 0; i < n->nparams; i++)
+            c->params[i] = str_dup(n->params[i]);
+        c->nparams = n->nparams;
+    }
+    return c;
 }
 
 static void add_arg(Node *n, Node *arg)
@@ -192,6 +227,15 @@ void node_free(Node *n)
 static Node *parse_expr(Parser *P);
 static Node *parse_unary(Parser *P);
 
+/* At a name: is "=" next (and not "==")? */
+static int is_op_after_name(const Parser *P)
+{
+    const char *p = P->p;
+    while (isspace((unsigned char)*p))
+        p++;
+    return p[0] == '=' && p[1] != '=';
+}
+
 /* sum(k=1, 10, body) or sum(k, 1, 10, body); the '(' is already consumed. */
 static Node *parse_big_op(Parser *P, NodeKind kind, const char *shown)
 {
@@ -199,7 +243,7 @@ static Node *parse_big_op(Parser *P, NodeKind kind, const char *shown)
         fail(P, "%s needs an index variable, like %s(k=1, 10, k^2)", shown, shown);
         return NULL;
     }
-    Node *n = new_node(kind, 0);
+    Node *n = node_new(kind, 0);
     n->name = tok_dup(&P->tok);
     next(P);
     if (is_op(P, '=') || is_op(P, ','))
@@ -221,12 +265,89 @@ static Node *parse_big_op(Parser *P, NodeKind kind, const char *shown)
     return n;
 }
 
+/*
+ * int(x=0, 1, x^2), like a sum, or int(x^2, 0, 1) in a Casio's order, which
+ * integrates over x. The '(' is already consumed.
+ */
+static Node *parse_integral(Parser *P)
+{
+    if (P->tok.kind == T_NAME && is_op_after_name(P))
+        return parse_big_op(P, NODE_INT, "int");
+    Node *n = node_new(NODE_INT, 3);
+    n->name = str_dup("x");
+    for (int i = 0; i < 3; i++) {
+        Node *arg = parse_expr(P);
+        if (!arg || !expect(P, i < 2 ? ',' : ')')) {
+            node_free(arg);
+            node_free(n);
+            return NULL;
+        }
+        n->args[i == 0 ? 2 : i - 1] = arg;
+    }
+    return n;
+}
+
+/*
+ * After the name "d": is this "d/dx(", a derivative? Returns the length of
+ * the variable's name (x), or 0.
+ */
+static size_t derivative_ahead(const Parser *P)
+{
+    const char *p = P->p;
+    if (p[0] != '/' || p[1] != 'd')
+        return 0;
+    p += 2;
+    const char *v = p;
+    if ((unsigned char)*p >= 0x80) {   /* one symbol, like θ */
+        unsigned char c = (unsigned char)*p;
+        p += c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    } else {
+        while (isalpha((unsigned char)*p))
+            p++;
+    }
+    size_t len = (size_t)(p - v);
+    while (isspace((unsigned char)*p))
+        p++;
+    return len && *p == '(' ? len : 0;
+}
+
+/* d/dx(f) or d/dx(f, a), with P at the "d". */
+static Node *parse_derivative(Parser *P, size_t var_len)
+{
+    Node *n = node_new(NODE_DIFF, 0);
+    Token var = {T_NAME, P->p + 2, var_len, 0};
+    n->name = tok_dup(&var);
+    P->p = strchr(P->p + 2 + var_len, '(') + 1;
+    next(P);
+    for (;;) {
+        Node *arg = parse_expr(P);
+        if (!arg) {
+            node_free(n);
+            return NULL;
+        }
+        add_arg(n, arg);
+        if (n->nargs == 1 && is_op(P, ',')) {
+            next(P);
+            continue;
+        }
+        if (!expect(P, ')')) {
+            node_free(n);
+            return NULL;
+        }
+        return n;
+    }
+}
+
 static Node *parse_primary(Parser *P)
 {
     Token t = P->tok;
 
+    size_t var_len;
+    if (t.kind == T_NAME && t.len == 1 && t.start[0] == 'd' && (var_len = derivative_ahead(P)))
+        return parse_derivative(P, var_len);
+
     if (t.kind == T_NUM) {
-        Node *n = new_node(NODE_NUM, 0);
+        Node *n = node_new(NODE_NUM, 0);
         if (rat_set_decimal(&n->value, t.start, t.len)) {
             fail(P, "invalid number '%.*s'", (int)t.len, t.start);
             node_free(n);
@@ -239,7 +360,7 @@ static Node *parse_primary(Parser *P)
     if (t.kind == T_NAME) {
         next(P);
         if (!is_op(P, '(')) {
-            Node *n = new_node(NODE_VAR, 0);
+            Node *n = node_new(NODE_VAR, 0);
             n->name = tok_dup(&t);
             return n;
         }
@@ -248,8 +369,10 @@ static Node *parse_primary(Parser *P)
             return parse_big_op(P, NODE_SUM, "sum");
         if (tok_is(&t, PROD_NAMES))
             return parse_big_op(P, NODE_PROD, "prod");
+        if (tok_is(&t, INT_NAMES))
+            return parse_integral(P);
 
-        Node *n = new_node(NODE_CALL, 0);
+        Node *n = node_new(NODE_CALL, 0);
         n->name = tok_dup(&t);
         if (is_op(P, ')')) {
             next(P);
@@ -296,7 +419,7 @@ static Node *parse_postfix(Parser *P)
     Node *n = parse_primary(P);
     while (n && is_op(P, '!') && P->p[0] != '=') {   /* "!=" is "not equal", not a factorial */
         next(P);
-        Node *f = new_node(NODE_FACT, 1);
+        Node *f = node_new(NODE_FACT, 1);
         f->args[0] = n;
         n = f;
     }
@@ -305,7 +428,7 @@ static Node *parse_postfix(Parser *P)
 
 static Node *binop(char op, Node *l, Node *r)
 {
-    Node *n = new_node(NODE_BINOP, 2);
+    Node *n = node_new(NODE_BINOP, 2);
     n->op = op;
     n->args[0] = l;
     n->args[1] = r;
@@ -334,7 +457,7 @@ static Node *parse_unary(Parser *P)
         Node *operand = parse_unary(P);
         if (!operand || op == '+')
             return operand;
-        Node *n = new_node(NODE_NEG, 1);
+        Node *n = node_new(NODE_NEG, 1);
         n->args[0] = operand;
         return n;
     }
@@ -404,7 +527,7 @@ static Node *parse_statement(Parser *P)
             Node *value = parse_expr(P);
             if (!value)
                 return NULL;
-            Node *n = new_node(NODE_ASSIGN, 1);
+            Node *n = node_new(NODE_ASSIGN, 1);
             n->name = tok_dup(&name);
             n->args[0] = value;
             return n;
@@ -436,7 +559,7 @@ static Node *parse_statement(Parser *P)
                         free(params[--np]);
                     return NULL;
                 }
-                Node *n = new_node(NODE_DEFUN, 1);
+                Node *n = node_new(NODE_DEFUN, 1);
                 n->name = tok_dup(&name);
                 n->args[0] = body;
                 n->params = malloc(np * sizeof *n->params);
@@ -501,7 +624,7 @@ static Node *parse_relations(Parser *P, Node *n, int chain)
             node_free(n);
             return NULL;
         }
-        Node *rel = new_node(NODE_REL, 2);
+        Node *rel = node_new(NODE_REL, 2);
         rel->op = op;
         rel->args[0] = n;
         rel->args[1] = rhs;
@@ -542,7 +665,7 @@ Node *parse_check(const char *src, char *err, size_t errlen)
 static Node *parse_points(Parser *P)
 {
     Parser start = *P;
-    Node *n = new_node(NODE_POINTS, 0);
+    Node *n = node_new(NODE_POINTS, 0);
     while (is_op(P, '(')) {
         next(P);
         Node *a = parse_expr(P);

@@ -194,6 +194,32 @@ static void draw_radical(float x, float base, float s, float top, float bottom, 
 
 static float prev_asc;   /* height of the item before the current one, for exponents */
 
+/* Is the cursor of the editor being typed in somewhere inside it? */
+static int cursor_inside(const Item *it)
+{
+    for (const Row *r = cur->row; r && r->owner; r = r->owner->row)
+        if (r->owner == it)
+            return 1;
+    return 0;
+}
+
+/* The plain text of a box of characters, like the x of d/dx. */
+static void row_text(const Row *r, char *buf, size_t n, const char *empty)
+{
+    size_t len = 0;
+    buf[0] = '\0';
+    for (int i = 0; i < r->len; i++) {
+        const Item *it = r->items[i];
+        size_t k = strlen(it->ch);
+        if (it->kind != IT_CHAR || len + k + 1 > n)
+            break;
+        memcpy(buf + len, it->ch, k + 1);
+        len += k;
+    }
+    if (len == 0)
+        snprintf(buf, n, "%s", empty);
+}
+
 static Box layout_item(const Item *it, float s, int draw, float x, float base, Color c)
 {
     float th = thickness(s);
@@ -294,6 +320,81 @@ static Box layout_item(const Item *it, float s, int draw, float x, float base, C
             draw_paren("(", bx, base, body, ps, c);
             layout_row(it->slot[3], s, 1, bx + pw, base, c);
             draw_paren(")", bx + pw + body.w, base, body, ps, c);
+        }
+        break;
+    }
+
+    case IT_INT: {
+        /* ∫ with "to" above and "from" below, the body, then d and the variable */
+        const char *sym = "\xE2\x88\xAB";
+        float ss = s * 1.75f, ls = sub_size(s, 0.6f);
+        float sw = tw(sym, ss);
+        float sym_base = base - AXIS * s + 0.30f * ss;   /* centers the symbol on the axis */
+        float sym_top = sym_base - 0.78f * ss;
+        Box up = measure(it->slot[2], ls), lo = measure(it->slot[1], ls);
+        float col = maxf(maxf(sw, up.w), lo.w) + 0.1f * s;
+        float up_base = sym_top - 0.04f * s - up.desc;
+        float lo_base = sym_base + 0.3f * s + maxf(lo.asc, ASC * ls);
+        Box body = measure(it->slot[3], s), v = measure(it->slot[0], s);
+        float dw = tw("d", s), gap = 0.18f * s;
+        b.w = col + 0.08f * s + body.w + gap + dw + v.w + 0.05f * s;
+        b.asc = maxf(maxf(base - up_base + up.asc, body.asc), v.asc);
+        b.desc = maxf(maxf(lo_base - base + maxf(lo.desc, DESC * ls), body.desc), v.desc);
+        if (draw) {
+            text_at(sym, x + (col - sw) / 2, sym_base, ss, c);
+            layout_row(it->slot[2], ls, 1, x + (col - up.w) / 2, up_base, c);
+            layout_row(it->slot[1], ls, 1, x + (col - lo.w) / 2, lo_base, c);
+            float bx = x + col + 0.08f * s;
+            layout_row(it->slot[3], s, 1, bx, base, c);
+            text_at("d", bx + body.w + gap, base, s, c);
+            layout_row(it->slot[0], s, 1, bx + body.w + gap + dw, base, c);
+        }
+        break;
+    }
+
+    case IT_DIFF: {
+        /* d/dx, the body in parentheses, then |x=a for the point */
+        float fs = s * 0.92f, ls = sub_size(s, 0.6f), gap = 0.12f * s;
+        Box v = measure(it->slot[0], fs);
+        float dw = tw("d", fs);
+        float fw = maxf(dw, dw + v.w) + 0.3f * s;
+        float axis = base - AXIS * s;
+        float nbase = axis - gap - DESC * fs, dbase = axis + th + gap + maxf(v.asc, ASC * fs);
+        Box body = measure(it->slot[1], s);
+        float ps = paren_size(body, s), pw = tw("(", ps);
+        Box pt = measure(it->slot[2], ls);
+        char var[64];
+        row_text(it->slot[0], var, sizeof var, "x");
+        char at[80];
+        snprintf(at, sizeof at, "%s=", var);
+        float aw = tw(at, ls);
+        float bar_top = base - maxf(body.asc, ASC * s) - 0.05f * s;
+        float bar_bottom = base + maxf(body.desc, DESC * s) + 0.1f * s;
+        float sub_base = bar_bottom + 0.05f * s;
+        float barx = x + fw + 2 * pw + body.w + 0.12f * s;
+        /* the point is optional: d/dx(x^3) on its own is the slope at x */
+        int show_point = it->slot[2]->len > 0 || cursor_inside(it);
+        b.w = show_point ? barx - x + th + 0.06f * s + aw + pt.w + 0.05f * s : barx - x;
+        b.asc = maxf(base - (nbase - ASC * fs), base - bar_top);
+        b.desc = maxf(maxf(dbase + maxf(v.desc, DESC * fs) - base, body.desc),
+                      show_point ? sub_base - base + maxf(pt.desc, DESC * ls) : 0);
+        if (!show_point)
+            b.asc = maxf(base - (nbase - ASC * fs), body.asc);
+        if (draw) {
+            DrawRectangleRec((Rectangle){x + 0.1f * s, axis, fw - 0.2f * s, th}, c);
+            text_at("d", x + (fw - dw) / 2, nbase, fs, c);
+            float bx = x + (fw - dw - v.w) / 2;
+            text_at("d", bx, dbase, fs, c);
+            layout_row(it->slot[0], fs, 1, bx + dw, dbase, c);
+            float px = x + fw;
+            draw_paren("(", px, base, body, ps, c);
+            layout_row(it->slot[1], s, 1, px + pw, base, c);
+            draw_paren(")", px + pw + body.w, base, body, ps, c);
+            if (show_point) {
+                DrawRectangleRec((Rectangle){barx, bar_top, th, bar_bottom - bar_top}, c);
+                text_at(at, barx + th + 0.06f * s, sub_base, ls, c);
+                layout_row(it->slot[2], ls, 1, barx + th + 0.06f * s + aw, sub_base, c);
+            }
         }
         break;
     }
@@ -881,6 +982,9 @@ static const Button FN_BUTTONS[] = {
 
     TXT("i", "i", K_FN), TXT("Re", "re(", K_FN), TXT("Im", "im(", K_FN), TXT("conj", "conj(", K_FN),
     TXT("arg", "arg(", K_FN), {"x\xE2\x81\xBB\xC2\xB9", -1, A_INVERSE, NULL, IT_CHAR, K_FN},
+
+    {"d/dx", -1, A_TEMPLATE, NULL, IT_DIFF, K_FN}, {"\xE2\x88\xAB dx", -1, A_TEMPLATE, NULL, IT_INT, K_FN},
+    TXT("x", "x", K_FN), TXT("t", "t", K_FN), TXT("floor", "floor(", K_FN), TXT("mod", "%", K_FN),
 };
 
 static const Button NUM_BUTTONS[] = {
@@ -2966,7 +3070,7 @@ static Font load_font(void)
         "abcdefghijklmnopqrstuvwxyz{|}~"
         "\xE2\x89\x88\xCF\x80\xCE\xA3\xCE\xA0\xE2\x88\x91\xE2\x88\x8F\xE2\x88\x9A"
         "\xC3\xB7\xC3\x97\xE2\x88\x92\xE2\x8C\xAB\xCA\xB8\xE2\x80\xA6\xE2\x81\xBB\xC2\xB9"
-        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7\xE2\x86\x90\xE2\x86\x91\xE2\x86\x93\xE2\x8C\x82\xCE\xB8\xE2\x89\xA4\xE2\x89\xA5\xE2\x89\xA0";
+        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7\xE2\x86\x90\xE2\x86\x91\xE2\x86\x93\xE2\x8C\x82\xCE\xB8\xE2\x89\xA4\xE2\x89\xA5\xE2\x89\xA0\xE2\x88\xAB";
     int count;
     int *cps = LoadCodepoints(chars, &count);
 
@@ -3036,7 +3140,7 @@ int main(void)
         Rectangle modebar = {PAD, screen.y + screen.height + PAD, W - 2 * PAD > 700 ? 700 : W - 2 * PAD,
                              MODEBAR_H};
         float gy = modebar.y + MODEBAR_H + PAD;
-        float fn_h = (H - gy - PAD) * 0.53f;   /* 5 rows of functions over 4 of numbers */
+        float fn_h = (H - gy - PAD) * 0.58f;   /* 6 rows of functions over 4 of numbers */
         Rectangle fn_area = {PAD, gy, W - 2 * PAD, fn_h};
         Rectangle num_area = {PAD, gy + fn_h + PAD, W - 2 * PAD, H - gy - fn_h - 2 * PAD};
 
@@ -3055,7 +3159,7 @@ int main(void)
         draw_modebar(modebar);
         if (no_keys) {
             const char *text_hint[] = {
-                "sum prod sqrt root cbrt abs exp frac pi \xE2\x86\x92 templates",
+                "sum prod int sqrt root cbrt abs exp frac pi, d/dx( \xE2\x86\x92 templates",
                 "Tab or , next box \xC2\xB7 ) leave \xC2\xB7 / fraction \xC2\xB7 ^ power",
             };
             const char *table_hint[] = {

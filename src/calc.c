@@ -29,6 +29,7 @@ static const char HELP[] =
     "Commands:   :deg  :rad  :sci  :fix  :digits N  :help  :quit\n"
     "Saving:     :vars  :clear [name]  :save [file]  :load file   (saved automatically)\n"
     "History:    :history [N]  :history clear   (kept between runs)\n"
+    "Calculus:   d/dx(x^3, 2) = 12 (exact)   int(x=0, 1, x^2) = 1/3   int(sin(x), 0, pi)\n"
     "Checks:     2 + 2 = 4  \xE2\x86\x92 True    sqrt(2) > 1.5   x == 3   1 < x \xE2\x89\xA4 5   3 != 4 (or \xE2\x89\xA0)\n"
     "Tables:     :table x^2 + 1 from 1 to 5 step 1    (add ; g(x) after f(x) for two columns)\n"
     "\xE2\x89\x88 marks an approximate result; everything else is exact.";

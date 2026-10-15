@@ -21,8 +21,9 @@ correct to every digit shown.
 
 ## What it can do
 
-- **Natural display.** Fractions, roots, powers, logs, |x|, Σ and Π are
-  templates with boxes to fill in, and the answer appears in the bottom right.
+- **Natural display.** Fractions, roots, powers, logs, |x|, Σ, Π, ∫ and d/dx
+  are templates with boxes to fill in, and the answer appears in the bottom
+  right.
 - **Type it or tap it.** In TEXT mode you just type: `sum` turns into Σ, `/`
   makes a fraction, `^` starts a power and Tab moves between boxes. KEYS mode
   brings back the calculator buttons.
@@ -32,6 +33,9 @@ correct to every digit shown.
 - **Any precision.** Show anywhere from a few digits to thousands
   (`:digits 1000` gives π to 1000 places).
 - **Sums and products.** Σ and Π are built in, nested as deep as you like.
+- **Derivatives and integrals.** `d/dx(x^3, 2)` is exactly 12, worked out by
+  the rules rather than estimated. `∫₀¹ x² dx` is exactly 1/3, and
+  `∫₀^π sin x dx` ≈ 2 to every digit shown.
 - **Roots, logs and trig.** In radians or degrees, with inverse and
   hyperbolic functions.
 - **Complex numbers.** `sqrt(-4)` = `2i`, `(1+2i)(3-i)` = `5 + 5i`, and
@@ -100,6 +104,8 @@ what you type turns into templates:
 | Type | Get |
 |---|---|
 | `sum`, `prod` | Σ or Π with boxes for the variable, start and end, and the body |
+| `int` | ∫ with boxes for the variable, start and end, and the body |
+| `d/dx(` | a derivative: `d/dx(x^3, 2)` is the slope of x³ at 2 |
 | `sqrt`, `cbrt`, `root` | √ templates |
 | `/` | a fraction, with what's before it on top: `1/2+3` is ½ + 3 |
 | `^` | a power: `2^10-1` is 2¹⁰ − 1 |
@@ -119,6 +125,22 @@ becomes `Ans×3`.
 the keyboard still works.
 
 <img src="docs/screenshots/check.png" width="260" align="right" alt="Σk³ = (Σk)² checked as True">
+
+**Calculus.** These follow the same pattern as Σ:
+- **Integrals:** `int(x=0, 1, x^2)`, or Casio's order `int(x^2, 0, 1)`.
+- **Derivatives:** `d/dx(f, a)` gives the slope at x = a. Leave the point out
+  and `d/dx(f)` uses the current value of x, so `h(x) = d/dx(x^3)` defines the
+  derivative as a function.
+
+Derivatives are exact. The engine applies the rules (product rule, chain
+rule and so on) and then works out the result, so `d/dx(x^3, 2)` is exactly
+12, and `d/dx(d/dx(x^3), 2)` is a second derivative.
+
+Integrals of polynomials are exact. Anything else uses tanh-sinh quadrature
+at full precision. That handles ends where the function blows up, like
+`∫₀¹ 1/√x dx` = 2. It also finds the corners and jumps of abs, floor and
+round, and splits the integral there. If an integral never settles, like
+∫₀¹ 1/x dx, it says so instead of showing a wrong number.
 
 **True or false.** Type a comparison and it tells you whether it holds:
 
@@ -163,6 +185,7 @@ next to a line hides its curve.
 | `r = 1 + cos(theta)` | a polar curve, with θ's range under the line |
 | `(1, 2)`, `(1, 2), (-4, 1)` | points (click one for its exact coordinates) |
 | `a = 2` | a slider |
+| `y = d/dx(f(x))`, `y = int(t=0, x, f(t))` | the derivative or the area function of f |
 
 A line that uses an undefined name, like `y = ax + 1`, offers a button to add
 a slider for it.
@@ -234,6 +257,8 @@ There are three ways to run it:
 | Variables | `x = 5`, `rate = 0.05`, `θ = pi/3`; `ans` (or `Ans`) is the previous result |
 | Functions | `f(x) = x^2 + 1`, `g(a, b) = sqrt(a^2 + b^2)`, then `f(3)`, `g(3, 4)` |
 | Implicit × | `2pi`, `3(4+1)`, `2sin(30)` multiply |
+| Derivatives | `d/dx(x^3, 2)` (the slope at 2), `d/dx(sin(x))` (at the current x), `d/dt(...)` |
+| Integrals | `int(x=0, 1, x^2)`, `int(x^2, 0, 1)`, `∫(t=0, pi, sin(t))` |
 | True or false | `2 + 2 = 4` → True, `pi > 3.14`, `1 < x ≤ 5`, `x == 3`, `3 != 4` (or `≠`, `<>`) |
 | Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:help`, `:quit` |
 | Definitions | `:vars`, `:clear [name]`, `:save [file]`, `:load file` |
@@ -288,6 +313,7 @@ src/cmath.c     complex arithmetic and complex exp, ln, sqrt, sin, cos, ...
 src/parser.c    text -> expression tree (recursive descent)
 src/eval.c      walks the tree; tracks exact vs approximate; all functions
 src/symbols.c   the table of user variables and functions
+src/calculus.c  derivative rules, and integrals (tanh-sinh, Newton-Cotes)
 src/calc.c      the engine API a front end calls: calc_eval(line) -> text
 src/feval.c     fast floating-point evaluation for drawing graphs
 src/graph.c     the graph's expression list, and exact key points

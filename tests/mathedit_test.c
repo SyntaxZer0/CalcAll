@@ -166,6 +166,12 @@ int main(void)
         {"1/2<=1", "(1/2)\xE2\x89\xA4" "1", "True"},
         {"3>=4", "3\xE2\x89\xA5" "4", "False"},
         {"2^3!=6", "2^3\xE2\x89\xA0" "6", "True"},   /* "!=" isn't a factorial in the exponent */
+        {"d/dx(x^3,2)", "d/dx(x^3, 2)", "12"},   /* the fraction d/dx turns into a derivative */
+        {"3d/dx(x^2,1)", "3 d/dx(x^2, 1)", "6"},
+        {"d/dt(t^2)", "d/dt(t^2)", NULL},          /* no point: the slope at t */
+        {"int(x=0,1,x^2)", "int(x=0, 1, x^2)", "0.33333333333333333333...  (= 1/3)"},
+        {"int(t=1,2,2t)+1", "int(t=1, 2, 2t)+1", "4"},
+        {"1/dx(2)", "(1/(dx(2)))", NULL},          /* not a d on top: an ordinary fraction */
     };
     for (size_t i = 0; i < sizeof typed / sizeof *typed; i++) {
         ed_clear(&e);
@@ -187,9 +193,9 @@ int main(void)
 
     /* Rebuilding from saved text: serialize, rebuild, serialize again is stable. */
     const char *texts[] = {"(1/3)+(1/6)", "((1/3))+((1/6))", "sqrt(2)", "sum(k=1, 10, k^2)", "(1/(2+3))+1",
-                           "((1/2))^2", "2^10-1"};
+                           "((1/2))^2", "2^10-1", "d/dx(x^3, 2)", "2 d/dx(sin(x))", "int(x=0, 1, x^2)"};
     const char *want[] = {"(1/3)+(1/6)", "(1/3)+(1/6)", "sqrt(2)", "sum(k=1, 10, k^2)", "(1/(2+3))+1",
-                          "(1/2)^2", "2^10-1"};
+                          "(1/2)^2", "2^10-1", "d/dx(x^3, 2)", "2 d/dx(sin(x))", "int(x=0, 1, x^2)"};
     for (size_t i = 0; i < sizeof texts / sizeof *texts; i++) {
         ed_from_text(&e, texts[i]);
         check(texts[i], &e, want[i], NULL);

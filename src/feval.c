@@ -1,5 +1,7 @@
 #include "feval.h"
 
+#include "calculus.h"
+
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
@@ -18,7 +20,7 @@
 #define M_E 2.71828182845904523536
 #endif
 
-enum { F_NUM, F_SLOT, F_NEG, F_BIN, F_FACT, F_CALL, F_USER, F_SUM, F_PROD };
+enum { F_NUM, F_SLOT, F_NEG, F_BIN, F_FACT, F_CALL, F_USER, F_SUM, F_PROD, F_LET, F_INT };
 
 enum {
     B_SQRT, B_CBRT, B_ROOT, B_EXP, B_LN, B_LOG, B_LOG10, B_LOG2, B_SIN, B_COS, B_TAN, B_ASIN,
@@ -330,6 +332,63 @@ static FFunc *find_func(FEnv *env, const char *name)
     return add_func_global(env, u);
 }
 
+/* ---- Derivatives: names are looked up as compile_name() would ---------------- */
+
+static int is_constant_name(const char *name)
+{
+    return strcmp(name, "pi") == 0 || strcmp(name, "\xCF\x80") == 0 || strcmp(name, "e") == 0 ||
+           strcmp(name, "i") == 0;
+}
+
+static int fname_known(void *ctx, const char *name, int closed)
+{
+    Comp *c = ctx;
+    if (!closed)
+        for (int i = 0; i < c->nscope; i++)
+            if (c->scope[i] && strcmp(c->scope[i], name) == 0)
+                return 1;
+    for (int i = 0; i < c->env->nvars; i++)
+        if (strcmp(c->env->vars[i].name, name) == 0)
+            return 1;
+    if (c->env->globals && sym_var(c->env->globals, name))
+        return 1;
+    return is_constant_name(name);
+}
+
+static int fname_func(void *ctx, const char *name, char *const **params, int *nparams, const Node **body)
+{
+    Comp *c = ctx;
+    FFunc *f = find_func(c->env, name);
+    if (!f)
+        return 0;
+    *params = f->params;
+    *nparams = f->nparams;
+    *body = f->body;
+    return 1;
+}
+
+/* d/dx(f) at a: compiled as f' with x = a. */
+static FNode *compile_diff(Comp *c, const Node *n)
+{
+    char err[256];
+    Deriver d = {fname_known, fname_func, c, c->env->degrees, err, sizeof err};
+    Node *tree = derive(n->args[0], n->name, &d);
+    if (!tree)
+        return number(NAN);
+    Node *at = node_new(NODE_LET, 2);
+    at->name = dup(n->name);
+    if (n->nargs > 1) {
+        at->args[0] = node_clone(n->args[1]);
+    } else {
+        at->args[0] = node_new(NODE_VAR, 0);
+        at->args[0]->name = dup(n->name);
+    }
+    at->args[1] = tree;
+    FNode *f = compile(c, at);
+    node_free(at);   /* compiled code doesn't point into the tree */
+    return f;
+}
+
 static FNode *compile(Comp *c, const Node *n)
 {
     switch (n->kind) {
@@ -416,6 +475,42 @@ static FNode *compile(Comp *c, const Node *n)
             c->fn->nslots = c->nscope;
         f->a[2] = compile(c, n->args[2]);
         c->nscope--;
+        return f;
+    }
+
+    case NODE_DIFF:
+        return compile_diff(c, n);
+
+    case NODE_LET:
+    case NODE_INT: {
+        /* a value for a name (LET), or the integral's variable (INT) */
+        if (c->nscope >= MAX_SLOTS)
+            return number(NAN);
+        int is_let = n->kind == NODE_LET;
+        FNode *f = node(is_let ? F_LET : F_INT, is_let ? 2 : 3);
+        f->a[0] = compile(c, n->args[0]);
+        if (!is_let)
+            f->a[1] = compile(c, n->args[1]);
+        f->slot = c->nscope;
+        c->scope[c->nscope++] = n->name;
+        if (c->nscope > c->fn->nslots)
+            c->fn->nslots = c->nscope;
+        f->a[is_let ? 1 : 2] = compile(c, n->args[is_let ? 1 : 2]);
+        c->nscope--;
+        return f;
+    }
+
+    case NODE_APPLY: {
+        /* a user function's body applied to arguments: an unnamed function */
+        int np = (int)n->nparams;
+        FFunc *fn = add_func(c->env, "", n->params, np, n->args[np]);
+        compile_func(c->env, fn);
+        fn->params = NULL;   /* they belong to the tree, which goes away */
+        fn->body = NULL;
+        FNode *f = node(F_USER, np);
+        f->fn = fn;
+        for (int k = 0; k < np; k++)
+            f->a[k] = compile(c, n->args[k]);
         return f;
     }
 
@@ -590,6 +685,64 @@ static double call_builtin(int id, const double *a, int n, int degrees)
     return NAN;
 }
 
+static double ev(const FNode *n, double *s, int depth, int degrees);
+
+/*
+ * Tanh-sinh quadrature in doubles, for graphs (see calculus.c for the idea).
+ * Steps t = k/64 for 0 <= t <= 4, each level halving the step, until two
+ * levels agree. Points where f isn't a number (1/sqrt(x) right at 0) count
+ * as 0; their weight is negligible. A range that doesn't settle (a corner or
+ * a jump inside) is split in two, which closes in on the trouble.
+ */
+#define TS_DIV 64
+#define TS_STEPS (4 * TS_DIV)
+static double ts_c[TS_STEPS + 1], ts_w[TS_STEPS + 1];
+
+static void ts_init(void)
+{
+    if (ts_w[0] != 0)
+        return;
+    for (int k = 0; k <= TS_STEPS; k++) {
+        double t = (double)k / TS_DIV;
+        double g = exp(M_PI * sinh(t));
+        ts_c[k] = 1 / (g + 1);
+        ts_w[k] = 2 * M_PI * cosh(t) * ts_c[k] * (1 - ts_c[k]);
+    }
+}
+
+static double integrate(const FNode *n, double lo, double hi, double *s, int depth, int degrees, int splits,
+                        int *budget)
+{
+    ts_init();
+    double width = hi - lo, sum = 0, sabs = 0, prev = NAN;
+    for (int level = 0, step = TS_DIV; step >= 1; level++, step /= 2) {
+        for (int k = 0; k <= TS_STEPS; k += step) {
+            if (level > 0 && (k / step) % 2 == 0)
+                continue;   /* already added at a coarser level */
+            for (int side = 0; side < (k ? 2 : 1); side++) {
+                s[n->slot] = side ? hi - width * ts_c[k] : lo + width * ts_c[k];
+                double y = ev(n->a[2], s, depth, degrees);
+                --*budget;
+                if (isfinite(y)) {
+                    sum += ts_w[k] * y;
+                    sabs += ts_w[k] * fabs(y);
+                }
+            }
+        }
+        double h = (double)step / TS_DIV, value = width / 2 * h * sum;
+        double scale = fmax(fabs(value), fabs(width / 2 * h * sabs));
+        if (level >= 3 && fabs(value - prev) <= 1e-11 * scale)
+            return value;
+        if (level == 4 && splits < 10 && *budget > 0) {
+            double mid = lo + width / 2;
+            double left = integrate(n, lo, mid, s, depth, degrees, splits + 1, budget);
+            return left + integrate(n, mid, hi, s, depth, degrees, splits + 1, budget);
+        }
+        prev = value;
+    }
+    return prev;
+}
+
 static double ev(const FNode *n, double *s, int depth, int degrees)
 {
     switch (n->kind) {
@@ -651,6 +804,16 @@ static double ev(const FNode *n, double *s, int depth, int degrees)
             acc = n->kind == F_SUM ? acc + t : acc * t;
         }
         return acc;
+    }
+    case F_LET:
+        s[n->slot] = ev(n->a[0], s, depth, degrees);
+        return ev(n->a[1], s, depth, degrees);
+    case F_INT: {
+        double lo = ev(n->a[0], s, depth, degrees), hi = ev(n->a[1], s, depth, degrees);
+        if (!isfinite(lo) || !isfinite(hi))
+            return NAN;
+        int budget = 5000;   /* evaluations, so a graph never stalls on one point */
+        return lo == hi ? 0 : integrate(n, lo, hi, s, depth, degrees, 0, &budget);
     }
     }
     return NAN;

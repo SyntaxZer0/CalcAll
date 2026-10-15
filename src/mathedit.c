@@ -30,7 +30,10 @@ static int slots_for(ItemKind kind)
         return 2;
     case IT_SUM:
     case IT_PROD:
+    case IT_INT:
         return 4;
+    case IT_DIFF:
+        return 3;
     }
     return 0;
 }
@@ -252,10 +255,10 @@ void ed_insert_template(Editor *e, ItemKind kind, int grab)
 
     insert_item(e, it);
     int first = 0;
-    if (kind == IT_SUM || kind == IT_PROD) {
+    if (kind == IT_SUM || kind == IT_PROD || kind == IT_INT || kind == IT_DIFF) {
         int p = 0;
-        insert_text_into(it->slot[0], &p, "k");
-        first = 1;   /* start in the "from" box */
+        insert_text_into(it->slot[0], &p, kind == IT_SUM || kind == IT_PROD ? "k" : "x");
+        first = 1;   /* start in the "from" box, or the derivative's body */
     } else if (kind == IT_FRAC && it->slot[0]->len) {
         first = 1;   /* numerator was filled by grab: go to the denominator */
     }
@@ -328,11 +331,12 @@ static Item *open_template(Editor *e, ItemKind kind, int slot)
     return it;
 }
 
-/* Are all the boxes after slot s (in text order) already filled? */
+/* Are all the boxes after slot s (in text order) already filled? A
+ * derivative's point can stay empty. */
 static int rest_filled(const Item *it, int s)
 {
     for (int n = text_next_slot(it, s); n >= 0; n = text_next_slot(it, n))
-        if (it->slot[n]->len == 0)
+        if (it->slot[n]->len == 0 && !(it->kind == IT_DIFF && n == 2))
             return 0;
     return 1;
 }
@@ -343,7 +347,48 @@ static void leave(Editor *e, Item *owner)
     e->pos = item_index(owner) + 1;
 }
 
-static const char *const WORDS[] = {"sum", "prod", "sqrt", "root", "cbrt", "abs", "exp", "frac", "pi", "theta"};
+static const char *const WORDS[] = {"sum", "prod", "int", "sqrt", "root", "cbrt", "abs", "exp", "frac", "pi", "theta"};
+
+static int is_name_item(const Item *it)
+{
+    return it->kind == IT_CHAR && (isalpha((unsigned char)it->ch[0]) || (unsigned char)it->ch[0] >= 0x80);
+}
+
+/*
+ * "d/dx(" typed as text first makes the fraction d/dx; the "(" then turns it
+ * into a derivative of x. Returns 1 if it did. "3d/dx(" keeps the 3 in front.
+ */
+static int derivative_from_fraction(Editor *e)
+{
+    Item *frac = e->row->owner;
+    if (!frac || frac->kind != IT_FRAC || e->row != frac->slot[1] || e->pos != e->row->len)
+        return 0;
+    Row *num = frac->slot[0], *den = frac->slot[1];
+    if (num->len < 1 || !is_char(num->items[num->len - 1], 'd') ||
+        (num->len >= 2 && is_name_item(num->items[num->len - 2])))
+        return 0;
+    if (den->len < 2 || !is_char(den->items[0], 'd'))
+        return 0;
+    for (int i = 1; i < den->len; i++)
+        if (!is_name_item(den->items[i]))
+            return 0;
+
+    /* Out with the fraction; anything before the "d" goes back in front. */
+    Row *row = frac->row;
+    int at = item_index(frac);
+    row_remove(row, at);
+    while (num->len > 1)
+        row_insert(row, at++, row_remove(num, 0));
+    Item *d = item_new(IT_DIFF);
+    while (den->len > 1)
+        row_insert(d->slot[0], d->slot[0]->len, row_remove(den, 1));
+    item_free(frac);   /* with the two d's still in it */
+    d->closes = CLOSE_ON_PAREN;
+    row_insert(row, at, d);
+    e->row = d->slot[1];
+    e->pos = 0;
+    return 1;
+}
 
 void ed_type(Editor *e, const char *ch)
 {
@@ -357,6 +402,8 @@ void ed_type(Editor *e, const char *ch)
             e->row->owner->closes = CLOSE_ON_PAREN;
         return;
     }
+    if (c == '(' && derivative_from_fraction(e))
+        return;
 
     /* "<=", ">=" and "!=" become the symbols, for checks like 3 ≤ 4. In
      * "2^3!=6" the "!" was in the exponent, so the "≠" leaves it below. */
@@ -396,7 +443,7 @@ void ed_type(Editor *e, const char *ch)
     Item *owner = e->row->owner;
     if (owner && !open_paren(e->row, e->pos)) {
         int s = slot_index(owner, e->row);
-        int is_big = owner->kind == IT_SUM || owner->kind == IT_PROD;
+        int is_big = owner->kind == IT_SUM || owner->kind == IT_PROD || owner->kind == IT_INT;
         int next = text_next_slot(owner, s);
         if ((c == ',' || (c == '=' && is_big && s == 0)) && next >= 0) {
             e->row = owner->slot[next];
@@ -421,6 +468,8 @@ void ed_type(Editor *e, const char *ch)
         }
         if (strcmp(word, "sum") == 0) {
             open_template(e, IT_SUM, 0);
+        } else if (strcmp(word, "int") == 0) {
+            open_template(e, IT_INT, 0);
         } else if (strcmp(word, "prod") == 0) {
             open_template(e, IT_PROD, 0);
         } else if (strcmp(word, "sqrt") == 0) {
@@ -594,6 +643,10 @@ static int vertical_slot(const Item *it, int s, int dir)
     case IT_SUM:
     case IT_PROD:   /* 0, 1: "k=from" below the symbol; 2: "to" above it */
         return dir > 0 ? (s == 2 ? 1 : -1) : (s == 0 || s == 1 ? 2 : -1);
+    case IT_INT:    /* 1: from, below; 2: to, above */
+        return dir > 0 ? (s == 2 ? 1 : -1) : (s == 1 ? 2 : -1);
+    case IT_DIFF:   /* 0: the x in d/dx, below the d; 2: the point, lowered after the body */
+        return dir > 0 ? (s == 1 ? 2 : -1) : (s == 2 ? 1 : -1);
     case IT_ROOT:   /* 0: index, up and left; 1: radicand */
         return dir > 0 ? (s == 0 ? 1 : -1) : (s == 1 ? 0 : -1);
     case IT_LOGB:   /* 0: base, lowered; 1: argument */
@@ -746,6 +799,39 @@ static void ser_item(const Item *it, Buf *b, int *empty)
         ser_slot(it, 3, b, empty);
         put(b, ")");
         break;
+    case IT_INT:
+        put(b, "int(");
+        if (it->slot[0]->len)
+            ser_row(it->slot[0], b, empty);
+        else
+            put(b, "x");
+        put(b, "=");
+        ser_slot(it, 1, b, empty);
+        put(b, ", ");
+        ser_slot(it, 2, b, empty);
+        put(b, ", ");
+        ser_slot(it, 3, b, empty);
+        put(b, ")");
+        break;
+    case IT_DIFF: {
+        /* " d/dx(" with a space after a letter or digit, so "2d/dx" isn't read as a name "2d" */
+        char last = b->s && b->len ? b->s[b->len - 1] : ' ';
+        if (isalnum((unsigned char)last) || (unsigned char)last >= 0x80 || last == '.')
+            put(b, " ");
+        put(b, "d/d");
+        if (it->slot[0]->len)
+            ser_row(it->slot[0], b, empty);
+        else
+            put(b, "x");
+        put(b, "(");
+        ser_slot(it, 1, b, empty);
+        if (it->slot[2]->len) {
+            put(b, ", ");
+            ser_slot(it, 2, b, empty);
+        }
+        put(b, ")");
+        break;
+    }
     case IT_ABS:
         put(b, "abs(");
         ser_slot(it, 0, b, empty);

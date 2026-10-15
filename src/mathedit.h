@@ -24,7 +24,9 @@ typedef enum {
     IT_SUM,    /* slots: variable, from, to, body */
     IT_PROD,   /* slots: variable, from, to, body */
     IT_ABS,    /* slots: contents */
-    IT_LOGB    /* slots: base, argument */
+    IT_LOGB,   /* slots: base, argument */
+    IT_INT,    /* slots: variable, from, to, body */
+    IT_DIFF    /* slots: variable, body, point (optional) */
 } ItemKind;
 
 typedef struct Row Row;
@@ -68,7 +70,7 @@ void ed_insert_text(Editor *e, const char *utf8);
  * Inserts a template and moves the cursor into its first box to fill in.
  * For IT_FRAC with `grab`, the number or name just before the cursor moves
  * into the numerator, as when typing "12/" on a Casio. Sums and products
- * start with the variable "k" filled in.
+ * start with the variable "k" filled in, integrals and derivatives with "x".
  */
 void ed_insert_template(Editor *e, ItemKind kind, int grab);
 
@@ -76,9 +78,10 @@ void ed_insert_template(Editor *e, ItemKind kind, int grab);
 void ed_insert_pow(Editor *e, const char *exponent);
 
 /*
- * Types one character the way text mode does: names like sum, prod, sqrt,
- * root, cbrt, abs, exp and frac become templates as soon as they're typed
- * (and pi becomes π, theta θ); "/" and "^" make a fraction and a power. Inside a
+ * Types one character the way text mode does: names like sum, prod, int,
+ * sqrt, root, cbrt, abs, exp and frac become templates as soon as they're
+ * typed (and pi becomes π, theta θ), and so does d/dx( for a derivative;
+ * "/" and "^" make a fraction and a power. Inside a
  * template, "," (and "=" after a sum's variable) moves to the next box and
  * ")" leaves the template, so "sum(k=1, 10, k^2)" typed or pasted as text
  * builds the same thing as the buttons do.
@@ -111,8 +114,9 @@ void row_free(Row *r);
 
 /*
  * Text for the calculator engine, e.g. "(1/2)+3" (malloc'd). Sets
- * *empty_box if any box was left empty. A sum or product with no variable
- * uses k.
+ * *empty_box if any box was left empty, except a derivative's point, which
+ * is optional. A sum or product with no variable uses k, an integral or
+ * derivative x.
  */
 char *ed_serialize(const Row *r, int *empty_box);
 

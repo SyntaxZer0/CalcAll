@@ -215,6 +215,45 @@ session True 'x = 3' 'x == 3'
 session True 'x = 3' '2x + 1 = 7'
 session 3 'x = 3' '1 < 2' 'ans'
 
+# Derivatives: worked out exactly by the rules, not estimated
+check 'd/dx(x^3, 2)' 12
+check 'd/dx(x^3 - 2x, 1/2)' '-1.25'
+check 'd/dx(sin(x), 0)' 1
+check 'd/dx(sin(x), pi/3)' '≈ 0.5'
+check 'd/dx(e^x, 0)' 1
+check 'd/dx(ln(x), 2)' 0.5
+check 'd/dx(sqrt(x), 4)' 0.25
+check 'd/dx(x^x, 1)' 1
+check 'd/dx(abs(x), -2)' -1
+check 'd/dx(exp(i x), 0)' i
+check 'd/dx(d/dx(x^3), 2)' 12
+check 'd/dx(sum(k=1, 5, x^k), 1)' 15
+check '3d/dx(x^2, 1)' 6
+check 'd/dt(t^2, 3)' 6
+check 'd/dx(floor(x), 1)' 'error: floor jumps, so it has no derivative'
+check 'd/dx(x^2)' 'error: d/dx needs a value for x: write d/dx(f, 2) for the slope at x = 2'
+session '≈ 0.0087266462599716478846' ':deg' 'd/dx(sin(x), 60)'
+session 8 'f(x) = x^2 + 1' 'd/dx(f(2x), 1)'
+session 10 'x = 5' 'd/dx(x^2)'
+session 12 'h(x) = d/dx(x^3)' 'h(2)'
+
+# Integrals: exact for polynomials, otherwise to every digit shown
+check 'int(x=0, 1, x^2)' '0.33333333333333333333...  (= 1/3)'
+check 'int(x^2, 0, 1)' '0.33333333333333333333...  (= 1/3)'
+check '∫(t=1, 2, 2t)' 3
+check 'int(x=2, 0, x^3)' -4
+check 'int(x=0, pi, sin(x))' '≈ 2'
+check 'int(x=0, 1, 4/(1+x^2))' '≈ 3.1415926535897932385'
+check 'int(x=1, 2, 1/x)' '≈ 0.69314718055994530942'
+check 'int(x=0, 1, 1/sqrt(x))' '≈ 2'
+check 'int(x=-1, 1, 1/sqrt(1-x^2))' '≈ 3.1415926535897932385'
+check 'int(x=0, 2, abs(x - 1/3))' '≈ 1.4444444444444444444'
+check 'int(x=0, 2pi, abs(sin(x)))' '≈ 4'
+check 'int(x=0, pi, e^(i x))' '≈ 2i'
+check 'int(x=0, 1, 1/x)' 'error: the integral doesn'"'"'t settle: it may be infinite, or the function may jump or have a corner inside the range (try splitting it there)'
+check 'd/dx(int(t=0, x, t^2), 3)' 9
+session 4 'F(x) = int(t=0, x, t^2)' 'd/dx(F(x), 2)'
+
 # Saving: definitions come back in a new run, exact or approximate as before
 store=$(mktemp)
 printf '%s\n' 'x = 1/3' 'θ = pi/3' 'z = 3-4i' 'f(t) = t + x' | CALC_DEFINITIONS=$store "$CALC" >/dev/null

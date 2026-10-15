@@ -30,7 +30,12 @@ typedef enum {
     NODE_ASSIGN, /* name = args[0]  (only as a whole line) */
     NODE_DEFUN,  /* name(params...) = args[0]  (only as a whole line) */
     NODE_REL,    /* args[0] `op` args[1], op one of = < > l (<=) g (>=) n (!=); a check or graph */
-    NODE_POINTS  /* points (args[0], args[1]), (args[2], args[3]), ...; graph lines only */
+    NODE_POINTS, /* points (args[0], args[1]), (args[2], args[3]), ...; graph lines only */
+    NODE_DIFF,   /* d/dname of args[0], at args[1] if there is one (else at name's value) */
+    NODE_INT,    /* integral of args[2] for `name` from args[0] to args[1] */
+    /* Only made by the derivative rules (calculus.c), never by the parser: */
+    NODE_LET,    /* args[1] with `name` set to args[0] */
+    NODE_APPLY   /* args[nparams] (a user function's body) with params set to args[0..] */
 } NodeKind;
 
 #define MAX_PARAMS 8
@@ -54,6 +59,9 @@ struct Node {
  * Returns NULL and writes a message to err on a syntax error.
  */
 Node *parse(const char *src, char *err, size_t errlen);
+
+Node *node_new(NodeKind kind, size_t nargs);   /* with nargs NULL args to fill in */
+Node *node_clone(const Node *n);
 
 /* Like parse(), but "=" always checks: "pi = 3" and "sin(pi) = 0" aren't definitions. */
 Node *parse_check(const char *src, char *err, size_t errlen);

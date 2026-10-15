@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "approx.h"
+#include "calculus.h"
 #include "cmath.h"
 
 /* Safety limits so a typo like 9^9^9 fails fast instead of freezing. */
@@ -28,6 +29,7 @@ typedef struct {
     const Symbols *syms;      /* user variables and functions */
     const Binding *globals;   /* bindings visible everywhere, like ans */
     int depth;                /* how deeply user functions are calling each other */
+    int integrating;          /* inside an integral worked out numerically */
 } Ctx;
 
 void val_init(Value *v)
@@ -1609,6 +1611,598 @@ static int split_name(const char *name, const Binding *env, Value *out, Ctx *c)
     return ok ? 0 : fail(c, "unknown variable '%s'", name);
 }
 
+/* ---- Derivatives and integrals ------------------------------------------------ */
+
+/* How calculus.c looks names up: the same way evaluation does. */
+typedef struct {
+    Ctx *c;
+    const Binding *env;
+} Names;
+
+static int name_known(void *ctx, const char *name, int closed)
+{
+    Names *n = ctx;
+    Value v;
+    val_init(&v);
+    int found = lookup(name, closed ? n->c->globals : n->env, &v, n->c);
+    val_free(&v);
+    return found;
+}
+
+static int name_func(void *ctx, const char *name, char *const **params, int *nparams, const Node **body)
+{
+    Names *n = ctx;
+    const UserFunc *f = n->c->syms ? sym_func(n->c->syms, name) : NULL;
+    if (!f)
+        return 0;
+    *params = f->params;
+    *nparams = f->nparams;
+    *body = f->body;
+    return 1;
+}
+
+static Deriver deriver(Names *names)
+{
+    Deriver d = {name_known, name_func, names, names->c->degrees, names->c->msg, names->c->len};
+    return d;
+}
+
+/* d/dx(f) at a: the derivative's tree, evaluated with x = a. */
+static int eval_diff(const Node *n, const Binding *env, Value *out, Ctx *c)
+{
+    Value at;
+    val_init(&at);
+    int rc = 0;
+    if (n->nargs > 1)
+        rc = eval_node(n->args[1], env, &at, c);
+    else if (!lookup(n->name, env, &at, c))
+        rc = fail(c, "d/d%s needs a value for %s: write d/d%s(f, 2) for the slope at %s = 2", n->name, n->name,
+                  n->name, n->name);
+    if (rc == 0) {
+        Names names = {c, env};
+        Deriver d = deriver(&names);
+        Node *tree = derive(n->args[0], n->name, &d);
+        if (!tree) {
+            rc = -1;
+        } else {
+            Binding b = {n->name, &at, env};
+            rc = eval_node(tree, &b, out, c);
+            node_free(tree);
+        }
+    }
+    val_free(&at);
+    return rc;
+}
+
+typedef struct {
+    const Node *body;
+    const char *var;
+    const Binding *env;
+    Ctx *c;
+} Integrand;
+
+/*
+ * f(x) for the quadrature. x is a rounded point, so it's treated as
+ * approximate, which keeps the work small. Right next to an end, though,
+ * that can round 1 - x^2 to 0; then x is used exactly instead.
+ */
+static int integrand(void *ctx, const Rational *x, int near_end, Rational *re, Rational *im)
+{
+    Integrand *in = ctx;
+    Value xv, fv;
+    val_init(&xv);
+    val_init(&fv);
+    rat_copy(&xv.r, x);
+    xv.exact = near_end;
+    Binding b = {in->var, &xv, in->env};
+    int rc = eval_node(in->body, &b, &fv, in->c);
+    if (rc && !near_end) {
+        xv.exact = 1;
+        rc = eval_node(in->body, &b, &fv, in->c);
+    }
+    if (rc == 0) {
+        rat_swap(re, &fv.r);
+        rat_swap(im, &fv.im);
+    }
+    val_free(&xv);
+    val_free(&fv);
+    return rc;
+}
+
+/*
+ * The integral of a polynomial of degree deg, exactly: it equals a weighted
+ * sum of its values at deg + 1 evenly spaced points (Newton-Cotes).
+ */
+static int integrate_poly(Integrand *in, int deg, const Value *lo, const Value *hi, Value *out)
+{
+    Ctx *c = in->c;
+    int m = deg < 1 ? 1 : deg;
+    Rational *w = malloc((size_t)(m + 1) * sizeof *w);
+    if (!w)
+        exit(1);
+    for (int j = 0; j <= m; j++)
+        rat_init(&w[j]);
+    newton_cotes(w, m);
+
+    Value x, f, acc;
+    Rational width, step, t;
+    val_init(&x);
+    val_init(&f);
+    val_init(&acc);
+    rat_init(&width);
+    rat_init(&step);
+    rat_init(&t);
+    rat_sub(&width, &hi->r, &lo->r);
+    rat_set_i64(&t, m);
+    rat_div(&step, &width, &t);
+    acc.exact = lo->exact && hi->exact;
+    int rc = 0;
+    for (int j = 0; j <= m && rc == 0; j++) {
+        rat_set_i64(&t, j);
+        rat_mul(&t, &t, &step);
+        rat_add(&x.r, &lo->r, &t);
+        x.exact = acc.exact;
+        Binding b = {in->var, &x, in->env};
+        rc = eval_node(in->body, &b, &f, c);
+        if (rc)
+            break;
+        rat_mul(&t, &w[j], &f.r);
+        rat_add(&acc.r, &acc.r, &t);
+        rat_mul(&t, &w[j], &f.im);
+        rat_add(&acc.im, &acc.im, &t);
+        acc.exact = acc.exact && f.exact;
+        if (!acc.exact)
+            approx(&acc, c);
+    }
+    if (rc == 0) {
+        rat_mul(&acc.r, &acc.r, &width);
+        rat_mul(&acc.im, &acc.im, &width);
+        if (!acc.exact)
+            approx(&acc, c);
+        val_swap(out, &acc);
+    }
+    for (int j = 0; j <= m; j++)
+        rat_free(&w[j]);
+    free(w);
+    val_free(&x);
+    val_free(&f);
+    val_free(&acc);
+    rat_free(&width);
+    rat_free(&step);
+    rat_free(&t);
+    return rc;
+}
+
+/*
+ * Corners and jumps. Tanh-sinh needs a smooth function: across a corner like
+ * |x - 1/3| it only gains a digit every few levels. But corners and jumps
+ * can only come from abs, floor, ceil, round and %, so they can be found
+ * and the integral split there, leaving smooth pieces.
+ */
+#define MAX_KINKS 16
+#define MAX_BREAKS 200
+#define KINK_SAMPLES 64
+
+typedef struct {
+    Node *u;     /* where u = 0 (abs), u crosses a whole number (floor, ceil, %), or a half (round) */
+    char kind;   /* 'a', 'f' or 'r' */
+} Kink;
+
+static void find_kinks(const Node *n, const char *var, const Deriver *d, Kink *k, int *count)
+{
+    for (size_t i = 0; i < n->nargs; i++)
+        find_kinks(n->args[i], var, d, k, count);
+    if (*count >= MAX_KINKS)
+        return;
+    Node *u = NULL;
+    char kind = 0;
+    if (n->kind == NODE_CALL && n->nargs == 1) {
+        if (strcmp(n->name, "abs") == 0)
+            kind = 'a';
+        else if (strcmp(n->name, "floor") == 0 || strcmp(n->name, "ceil") == 0)
+            kind = 'f';
+        else if (strcmp(n->name, "round") == 0)
+            kind = 'r';
+        if (kind)
+            u = node_clone(n->args[0]);
+    } else if (n->kind == NODE_BINOP && n->op == '%') {
+        kind = 'f';   /* a % b jumps where a/b crosses a whole number */
+        u = node_new(NODE_BINOP, 2);
+        u->op = '/';
+        u->args[0] = node_clone(n->args[0]);
+        u->args[1] = node_clone(n->args[1]);
+    }
+    if (!u)
+        return;
+    if (poly_degree(u, var, d) == 0) {   /* doesn't change with var */
+        node_free(u);
+        return;
+    }
+    k[*count].u = u;
+    k[*count].kind = kind;
+    (*count)++;
+}
+
+/* u(x), real; -1 if it can't be worked out (it uses a sum's index, say). */
+static int kink_value(Integrand *in, const Node *u, const Rational *x, int exact, Rational *out)
+{
+    Value xv, v;
+    val_init(&xv);
+    val_init(&v);
+    rat_copy(&xv.r, x);
+    xv.exact = exact;
+    Binding b = {in->var, &xv, in->env};
+    char msg[256];
+    char *saved = in->c->msg;
+    size_t saved_len = in->c->len;
+    in->c->msg = msg;   /* failing here isn't an error of the integral's */
+    in->c->len = sizeof msg;
+    int rc = eval_node(u, &b, &v, in->c);
+    in->c->msg = saved;
+    in->c->len = saved_len;
+    if (rc == 0 && !is_real(&v))
+        rc = -1;
+    if (rc == 0) {
+        rat_swap(out, &v.r);
+        if (exact && !v.exact)
+            rc = -1;
+    }
+    val_free(&xv);
+    val_free(&v);
+    return rc;
+}
+
+/* Where u = target between x0 and x1 (u - target changes sign there). */
+static int kink_root(Integrand *in, const Kink *k, const Rational *target, const Rational *x0, const Rational *x1,
+                     Rational *root)
+{
+    Rational lo, hi, mid, v, t, two;
+    Rational *all[] = {&lo, &hi, &mid, &v, &t, &two};
+    for (size_t i = 0; i < sizeof all / sizeof *all; i++)
+        rat_init(all[i]);
+    int rc = -1;
+    Names names = {in->c, in->env};
+    Deriver d = deriver(&names);
+    char msg[256];
+    d.err = msg;
+    d.errlen = sizeof msg;
+    if (poly_degree(k->u, in->var, &d) == 1 && kink_value(in, k->u, x0, 1, &lo) == 0 &&
+        kink_value(in, k->u, x1, 1, &hi) == 0 && rat_sign((rat_sub(&t, &hi, &lo), &t)) != 0) {
+        /* a straight line: the exact crossing, x0 + (target - u0)(x1 - x0)/(u1 - u0) */
+        rat_sub(&v, target, &lo);
+        rat_sub(&mid, x1, x0);
+        rat_mul(&v, &v, &mid);
+        rat_div(&v, &v, &t);
+        rat_add(root, x0, &v);
+        rc = 0;
+        goto done;
+    }
+    /* otherwise halve the gap until it's below the working precision */
+    rat_copy(&lo, x0);
+    rat_copy(&hi, x1);
+    rat_set_i64(&two, 2);
+    if (kink_value(in, k->u, &lo, 0, &v))
+        goto done;
+    rat_sub(&v, &v, target);
+    int sign_lo = rat_sign(&v);
+    rat_sub(&t, &hi, &lo);
+    double width = rat_log10_abs(&t);
+    for (int i = 0; i < 4 * in->c->prec + 20; i++) {
+        rat_add(&mid, &lo, &hi);
+        rat_div(&mid, &mid, &two);
+        rat_round_sig(&mid, &mid, in->c->prec + 5);
+        if (kink_value(in, k->u, &mid, 0, &v))
+            goto done;
+        rat_sub(&v, &v, target);
+        int sm = rat_sign(&v);
+        if (sm == 0)
+            break;
+        if (sm == sign_lo)
+            rat_copy(&lo, &mid);
+        else
+            rat_copy(&hi, &mid);
+        rat_sub(&t, &hi, &lo);
+        if (rat_log10_abs(&t) < width - (in->c->prec + 3))
+            break;
+    }
+    rat_copy(root, &mid);
+    rc = 0;
+done:
+    for (size_t i = 0; i < sizeof all / sizeof *all; i++)
+        rat_free(all[i]);
+    return rc;
+}
+
+static int rat_cmp(const Rational *a, const Rational *b)
+{
+    Rational d;
+    rat_init(&d);
+    rat_sub(&d, a, b);
+    int s = rat_sign(&d);
+    rat_free(&d);
+    return s;
+}
+
+/* Adds x to the sorted list of break points, unless it's already there. */
+static void add_break(Rational *br, int *n, const Rational *x)
+{
+    int i = 0;
+    while (i < *n && rat_cmp(&br[i], x) < 0)
+        i++;
+    if ((i < *n && rat_cmp(&br[i], x) == 0) || *n >= MAX_BREAKS)
+        return;
+    for (int j = *n; j > i; j--)
+        rat_swap(&br[j], &br[j - 1]);
+    rat_copy(&br[i], x);
+    (*n)++;
+}
+
+/* Break points strictly between lo and hi (lo < hi) where some kink is. */
+static int find_breaks(Integrand *in, Kink *kinks, int nk, const Rational *lo, const Rational *hi, Rational *br)
+{
+    int nb = 0;
+    Rational xs[KINK_SAMPLES + 1], vs[KINK_SAMPLES + 1], step, t, target, root;
+    rat_init(&step);
+    rat_init(&t);
+    rat_init(&target);
+    rat_init(&root);
+    for (int j = 0; j <= KINK_SAMPLES; j++) {
+        rat_init(&xs[j]);
+        rat_init(&vs[j]);
+    }
+    rat_sub(&step, hi, lo);
+    rat_set_i64(&t, KINK_SAMPLES);
+    rat_div(&step, &step, &t);
+    for (int j = 0; j <= KINK_SAMPLES; j++) {
+        rat_set_i64(&t, j);
+        rat_mul(&t, &t, &step);
+        rat_add(&xs[j], lo, &t);
+    }
+    for (int k = 0; k < nk; k++) {
+        int ok = 1;
+        for (int j = 0; j <= KINK_SAMPLES && ok; j++)
+            ok = kink_value(in, kinks[k].u, &xs[j], 0, &vs[j]) == 0;
+        if (!ok)
+            continue;
+        /* shift so that the kinks are where u crosses a whole number (or 0) */
+        if (kinks[k].kind == 'r') {
+            rat_set_i64(&t, 2);
+            Rational half;
+            rat_init(&half);
+            rat_set_i64(&half, 1);
+            rat_div(&half, &half, &t);
+            for (int j = 0; j <= KINK_SAMPLES; j++)
+                rat_add(&vs[j], &vs[j], &half);
+            rat_free(&half);
+        }
+        for (int j = 0; j < KINK_SAMPLES; j++) {
+            if (kinks[k].kind == 'a') {
+                int s0 = rat_sign(&vs[j]), s1 = rat_sign(&vs[j + 1]);
+                if (s1 == 0 && j + 1 < KINK_SAMPLES)
+                    add_break(br, &nb, &xs[j + 1]);
+                else if (s0 && s1 && s0 != s1) {
+                    rat_set_i64(&target, 0);
+                    if (kink_root(in, &kinks[k], &target, &xs[j], &xs[j + 1], &root) == 0)
+                        add_break(br, &nb, &root);
+                }
+                continue;
+            }
+            /* every whole number u passes between these two samples */
+            Rational f0, f1;
+            rat_init(&f0);
+            rat_init(&f1);
+            rat_floor(&f0, &vs[j]);
+            rat_floor(&f1, &vs[j + 1]);
+            int up = rat_cmp(&f1, &f0) > 0;
+            Rational *from = up ? &f0 : &f1, *to = up ? &f1 : &f0;
+            if (rat_cmp(from, to) != 0) {
+                rat_set_i64(&t, 1);
+                rat_add(&target, from, &t);
+                for (int guard = 0; rat_cmp(&target, to) <= 0 && guard < MAX_BREAKS; guard++) {
+                    Rational shifted;
+                    rat_init(&shifted);
+                    rat_copy(&shifted, &target);
+                    if (kinks[k].kind == 'r') {   /* undo the shift by a half */
+                        Rational half;
+                        rat_init(&half);
+                        rat_set_i64(&half, 1);
+                        rat_set_i64(&t, 2);
+                        rat_div(&half, &half, &t);
+                        rat_sub(&shifted, &shifted, &half);
+                        rat_free(&half);
+                    }
+                    if (kink_root(in, &kinks[k], &shifted, &xs[j], &xs[j + 1], &root) == 0 &&
+                        rat_cmp(&root, lo) > 0 && rat_cmp(&root, hi) < 0)
+                        add_break(br, &nb, &root);
+                    rat_free(&shifted);
+                    rat_set_i64(&t, 1);
+                    rat_add(&target, &target, &t);
+                }
+            }
+            rat_free(&f0);
+            rat_free(&f1);
+        }
+    }
+    for (int j = 0; j <= KINK_SAMPLES; j++) {
+        rat_free(&xs[j]);
+        rat_free(&vs[j]);
+    }
+    rat_free(&step);
+    rat_free(&t);
+    rat_free(&target);
+    rat_free(&root);
+    return nb;
+}
+
+/* The integral by tanh-sinh, split at any corners and jumps. */
+static int integrate_numeric(Integrand *in, const Value *lo_v, const Value *hi_v, Value *out, int *settled)
+{
+    Ctx *c = in->c;
+    int digits = c->prec - 6;
+    const Rational *lo = &lo_v->r, *hi = &hi_v->r;
+    int flip = rat_cmp(lo, hi) > 0;
+    if (flip) {
+        const Rational *t = lo;
+        lo = hi;
+        hi = t;
+    }
+
+    Names names = {c, in->env};
+    Deriver d = deriver(&names);
+    char msg[256];
+    d.err = msg;
+    d.errlen = sizeof msg;
+    Kink kinks[MAX_KINKS];
+    int nk = 0;
+    find_kinks(in->body, in->var, &d, kinks, &nk);
+    Rational *br = calloc(MAX_BREAKS + 2, sizeof *br);
+    if (!br)
+        exit(1);
+    for (int i = 0; i < MAX_BREAKS + 2; i++)
+        rat_init(&br[i]);
+    int nb = nk ? find_breaks(in, kinks, nk, lo, hi, br + 1) : 0;
+    for (int k = 0; k < nk; k++)
+        node_free(kinks[k].u);
+    rat_copy(&br[0], lo);
+    rat_copy(&br[nb + 1], hi);
+
+    Rational re, im;
+    rat_init(&re);
+    rat_init(&im);
+
+    /* With several pieces, judge each against the size of the whole: a
+     * rough average of |f| over the range, times its width. */
+    double size = -HUGE_VAL;
+    if (nb > 0) {
+        Rational x, t, sum;
+        rat_init(&x);
+        rat_init(&t);
+        rat_init(&sum);
+        for (int j = 0; j < 16; j++) {
+            rat_set_i64(&x, 2 * j + 1);
+            rat_set_i64(&t, 32);
+            rat_div(&x, &x, &t);   /* (j + 1/2) / 16 */
+            rat_sub(&t, hi, lo);
+            rat_mul(&x, &x, &t);
+            rat_add(&x, lo, &x);
+            if (integrand(in, &x, 0, &re, &im) == 0) {
+                if (rat_sign(&re) < 0)
+                    rat_neg(&re);
+                if (rat_sign(&im) < 0)
+                    rat_neg(&im);
+                rat_add(&sum, &sum, &re);
+                rat_add(&sum, &sum, &im);
+                rat_round_sig(&sum, &sum, 10);
+            }
+        }
+        rat_sub(&t, hi, lo);
+        rat_mul(&sum, &sum, &t);
+        size = rat_log10_abs(&sum) - log10(16.0);
+        rat_free(&x);
+        rat_free(&t);
+        rat_free(&sum);
+    }
+
+    rat_set_i64(&out->r, 0);
+    rat_set_i64(&out->im, 0);
+    *settled = digits;
+    int rc = 0;
+    for (int i = 0; i <= nb && rc == 0; i++) {
+        int s;
+        rc = quad_tanh_sinh(&br[i], &br[i + 1], digits, c->prec, integrand, in, &re, &im, &s, size);
+        if (rc == 0) {
+            rat_add(&out->r, &out->r, &re);
+            rat_add(&out->im, &out->im, &im);
+            if (s < *settled)
+                *settled = s;
+        }
+    }
+    if (flip) {
+        rat_neg(&out->r);
+        rat_neg(&out->im);
+    }
+    for (int i = 0; i < MAX_BREAKS + 2; i++)
+        rat_free(&br[i]);
+    free(br);
+    rat_free(&re);
+    rat_free(&im);
+    return rc;
+}
+
+/* The integral of args[2] for name from args[0] to args[1]. */
+static int eval_int(const Node *n, const Binding *env, Value *out, Ctx *c)
+{
+    Value lo, hi;
+    val_init(&lo);
+    val_init(&hi);
+    int rc = -1;
+    if (eval_node(n->args[0], env, &lo, c) || eval_node(n->args[1], env, &hi, c))
+        goto done;
+    if (!is_real(&lo) || !is_real(&hi)) {
+        fail(c, "the limits of an integral must be real numbers");
+        goto done;
+    }
+    Integrand in = {n->args[2], n->name, env, c};
+    Names names = {c, env};
+    Deriver d = deriver(&names);
+    int deg = poly_degree(n->args[2], n->name, &d);
+    if (deg >= 0 && deg <= 40) {
+        rc = integrate_poly(&in, deg, &lo, &hi, out);
+        goto done;
+    }
+    if (c->integrating) {
+        /* thousands of points, each needing thousands more, would take minutes */
+        fail(c, "an integral inside another one has to be of a polynomial");
+        goto done;
+    }
+    c->integrating = 1;
+    int settled;
+    rc = integrate_numeric(&in, &lo, &hi, out, &settled);
+    c->integrating = 0;
+    if (rc == -2)
+        fail(c, "the integral doesn't settle: it may be infinite, or %s may jump or have a corner "
+                "inside the range (try splitting it there)",
+             n->args[2]->kind == NODE_VAR ? n->args[2]->name : "the function");
+    if (rc == 0) {
+        out->exact = 0;
+        if (settled >= c->prec - 6)
+            approx(out, c);   /* else it's already cut to the digits that are right */
+    }
+    rc = rc ? -1 : 0;
+
+done:
+    val_free(&lo);
+    val_free(&hi);
+    return rc;
+}
+
+/* A user function's body with its parameters set (made by derivatives). */
+static int eval_apply(const Node *n, const Binding *env, Value *out, Ctx *c)
+{
+    size_t np = n->nparams;
+    if (np > MAX_PARAMS)
+        return fail(c, "too many parameters");
+    if (c->depth >= MAX_CALL_DEPTH)
+        return fail(c, "functions call each other too many times");
+    Value args[MAX_PARAMS];
+    Binding params[MAX_PARAMS];
+    int rc = 0;
+    for (size_t i = 0; i < np; i++)
+        val_init(&args[i]);
+    for (size_t i = 0; i < np && rc == 0; i++)
+        rc = eval_node(n->args[i], env, &args[i], c);
+    if (rc == 0) {
+        for (size_t i = 0; i < np; i++)
+            params[i] = (Binding){n->params[i], &args[i], i + 1 < np ? &params[i + 1] : c->globals};
+        c->depth++;
+        rc = eval_node(n->args[np], np ? &params[0] : c->globals, out, c);
+        c->depth--;
+    }
+    for (size_t i = 0; i < np; i++)
+        val_free(&args[i]);
+    return rc;
+}
+
 static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
 {
     /* Real results only set out->r; start with no imaginary part. */
@@ -1676,6 +2270,24 @@ static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
     case NODE_ASSIGN:
     case NODE_DEFUN:
         return fail(c, "a definition can only be a whole line");
+    case NODE_DIFF:
+        return eval_diff(n, env, out, c);
+    case NODE_INT:
+        return eval_int(n, env, out, c);
+    case NODE_LET: {
+        Value v;
+        val_init(&v);
+        int rc = eval_node(n->args[0], env, &v, c);
+        if (rc == 0) {
+            Binding b = {n->name, &v, env};
+            rc = eval_node(n->args[1], &b, out, c);
+        }
+        val_free(&v);
+        return rc;
+    }
+    case NODE_APPLY:
+        return eval_apply(n, env, out, c);
+
     case NODE_REL:
         return fail(c, "a true or false check like 2 + 2 = 4 has to be the whole line");
     case NODE_POINTS:
@@ -1687,7 +2299,7 @@ static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
 int eval(const Node *n, const Binding *env, const EvalOptions *opt, Value *out, char *err,
          size_t errlen)
 {
-    Ctx c = {err, errlen, opt->prec, opt->degrees, opt->syms, env, 0};
+    Ctx c = {err, errlen, opt->prec, opt->degrees, opt->syms, env, 0, 0};
     return eval_node(n, env, out, &c);
 }
 
@@ -1743,7 +2355,7 @@ int eval_is_reserved(const char *name)
         "sqrt", "cbrt", "root", "exp", "ln", "log", "log10", "log2", "sin", "cos", "tan", "asin",
         "acos", "atan", "sinh", "cosh", "tanh", "abs", "arg", "re", "im", "conj", "floor", "ceil",
         "round", "gcd", "lcm", "choose", "nCr", "binomial", "perm", "nPr", "sum", "prod", "product",
-        "pi", "e", "i", "ans", "Ans",
+        "pi", "e", "i", "ans", "Ans", "int", "integral", "\xE2\x88\xAB" /* ∫ */,
         "\xCF\x80", "\xCE\xA3", "\xE2\x88\x91", "\xCE\xA0", "\xE2\x88\x8F",   /* π Σ ∑ Π ∏ */
     };
     for (size_t i = 0; i < sizeof RESERVED / sizeof *RESERVED; i++)

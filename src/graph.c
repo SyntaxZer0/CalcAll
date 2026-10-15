@@ -674,9 +674,36 @@ done:
     return rc;
 }
 
+/* Does n (or a function it calls) contain an integral? */
+static int has_integral(const Node *n, const Symbols *syms, int depth)
+{
+    if (!n || depth > 8)
+        return 0;
+    if (n->kind == NODE_INT)
+        return 1;
+    if (n->kind == NODE_CALL && syms) {
+        const UserFunc *f = sym_func(syms, n->name);
+        if (f && has_integral(f->body, syms, depth + 1))
+            return 1;
+    }
+    for (size_t i = 0; i < n->nargs; i++)
+        if (has_integral(n->args[i], syms, depth))
+            return 1;
+    return 0;
+}
+
 int graph_exact_point(Calc *c, const Graph *g, int row, int other, PointKind kind, double lo, double hi,
                       char **xs, char **ys)
 {
+    /* Pinning a point down takes a hundred or so evaluations; with an
+     * integral in each, that's too slow to wait for. */
+    for (int i = 0; i < g->count; i++)
+        if ((i == row || i == other) && has_integral(g->rows[i].tree, &c->syms, 0))
+            return -1;
+    for (int i = 0; i < g->count; i++)
+        if (g->rows[i].kind == GR_FUNC && has_integral(g->rows[i].tree, &c->syms, 0))
+            return -1;   /* a graph function the curve may call */
+
     int derivative = kind == PT_MAX || kind == PT_MIN;
     int prec = c->digits + GUARD + (derivative ? c->digits + 10 : 0);
     Exact x;

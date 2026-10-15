@@ -125,6 +125,32 @@ int main(void)
     free(xs);
     free(ys);
     graph_free(&g);
+
+    /* Derivatives and integrals as curves */
+    char *calculus[] = {
+        "y = d/dx(x^3)",                /* 0: 3x^2 */
+        "y = int(t=0, x, cos(t))",      /* 1: sin x */
+        "f(x) = x^2 + w(x)",            /* 2: a graph function using the user's w */
+        "y = d/dx(f(x))",               /* 3: 4x */
+        "a = 3",                        /* 4 */
+        "y = d/dx(a x^2)",              /* 5: 6x, through the slider */
+        "y = int(t=0, x, 1/sqrt(t))",   /* 6: 2 sqrt x, blowing up at 0 */
+        "y = d/dx(x^2 - 2x)",           /* 7: root exactly at 1 */
+        "y = d/dx(c x^2)",              /* 8: needs a slider for c */
+        "y = int(t=0, x, abs(t - 1))",  /* 9: a corner at 1 */
+    };
+    graph_build(&g, &c, calculus, NULL, 10);
+    r = g.rows;
+    expect("derivative curve", fabs(graph_y(&r[0], 2) - 12) < 1e-9, NULL);
+    expect("integral curve", fabs(graph_y(&r[1], 1) - sin(1)) < 1e-10, NULL);
+    expect("derivative of a function", fabs(graph_y(&r[3], 1.5) - 6) < 1e-9, NULL);
+    expect("derivative with a slider", fabs(graph_y(&r[5], 2) - 12) < 1e-9, NULL);
+    expect("integral blowing up", fabs(graph_y(&r[6], 4) - 4) < 1e-8, NULL);
+    nu = graph_unknowns(&r[8], &u);
+    expect("derivative's slider", nu == 1 && strcmp(u[0], "c") == 0, NULL);
+    expect("integral with a corner", fabs(graph_y(&r[9], 2) - 1) < 1e-4, NULL);
+    point(&c, &g, 7, -1, PT_ROOT, 0.9, 1.1, "1", "0");
+    graph_free(&g);
     calc_free(&c);
     printf("%d passed, %d failed\n", pass, fail);
     return fail != 0;
