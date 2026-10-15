@@ -122,6 +122,7 @@ static Item *item_clone(const Item *src)
 {
     Item *it = xcalloc(1, sizeof *it);
     it->kind = src->kind;
+    it->closes = src->closes;
     memcpy(it->ch, src->ch, sizeof it->ch);
     it->nslots = src->nslots;
     for (int i = 0; i < it->nslots; i++) {
@@ -146,6 +147,7 @@ void ed_init(Editor *e)
     e->root = row_new(NULL);
     e->row = e->root;
     e->pos = 0;
+    e->fresh = 0;
 }
 
 void ed_free(Editor *e)
@@ -171,6 +173,7 @@ void ed_load(Editor *e, const Row *src)
     e->root = row_clone(src);
     e->row = e->root;
     e->pos = e->root->len;
+    e->fresh = 0;
 }
 
 static void insert_item(Editor *e, Item *it)
@@ -198,6 +201,11 @@ void ed_insert_text(Editor *e, const char *utf8)
     insert_text_into(e->row, &e->pos, utf8);
 }
 
+static int is_char(const Item *it, char c)
+{
+    return it->kind == IT_CHAR && it->ch[0] == c && it->ch[1] == '\0';
+}
+
 /* Can this item be part of an operand pulled into a numerator? */
 static int is_operand(const Item *it)
 {
@@ -215,8 +223,26 @@ void ed_insert_template(Editor *e, ItemKind kind, int grab)
 
     if (kind == IT_FRAC && grab) {
         int start = e->pos;
-        while (start > 0 && is_operand(e->row->items[start - 1]))
-            start--;
+        for (;;) {
+            if (start > 0 && is_char(e->row->items[start - 1], ')')) {
+                /* (1+2)/ or sin(30)/: take the whole group */
+                int depth = 0, i = start;
+                while (i > 0) {
+                    i--;
+                    if (is_char(e->row->items[i], ')'))
+                        depth++;
+                    else if (is_char(e->row->items[i], '(') && --depth == 0)
+                        break;
+                }
+                if (depth != 0)
+                    break;
+                start = i;
+            } else if (start > 0 && is_operand(e->row->items[start - 1])) {
+                start--;
+            } else {
+                break;
+            }
+        }
         for (int i = start; i < e->pos; i++) {
             Item *moved = row_remove(e->row, start);
             row_insert(it->slot[0], it->slot[0]->len, moved);
@@ -247,6 +273,198 @@ void ed_insert_pow(Editor *e, const char *exponent)
     } else {
         e->row = it->slot[0];
         e->pos = 0;
+    }
+}
+
+/* ---- Text-mode typing ---------------------------------------------------------- */
+
+static int is_letter(const Item *it)
+{
+    return it->kind == IT_CHAR && it->ch[1] == '\0' && isalpha((unsigned char)it->ch[0]);
+}
+
+/* Does `word` end right before pos, as a whole word? */
+static int word_before(const Row *r, int pos, const char *word)
+{
+    int n = (int)strlen(word);
+    if (pos < n)
+        return 0;
+    for (int i = 0; i < n; i++)
+        if (!is_char(r->items[pos - n + i], word[i]))
+            return 0;
+    return pos == n || !is_letter(r->items[pos - n - 1]);
+}
+
+/* Is there a "(" before pos in this row that isn't closed yet? */
+static int open_paren(const Row *r, int pos)
+{
+    int depth = 0;
+    for (int i = 0; i < pos; i++) {
+        if (is_char(r->items[i], '('))
+            depth++;
+        else if (is_char(r->items[i], ')') && depth > 0)
+            depth--;
+    }
+    return depth > 0;
+}
+
+/* The box "," moves to, in the order the text form lists them: root(x, n)
+ * has the radicand (slot 1) first. -1 when it's the last one. */
+static int text_next_slot(const Item *it, int s)
+{
+    if (it->kind == IT_ROOT)
+        return s == 1 ? 0 : -1;
+    return s + 1 < it->nslots ? s + 1 : -1;
+}
+
+static Item *open_template(Editor *e, ItemKind kind, int slot)
+{
+    Item *it = item_new(kind);
+    it->closes = CLOSE_ON_PAREN;
+    insert_item(e, it);
+    e->row = it->slot[slot];
+    e->pos = 0;
+    e->fresh = 1;
+    return it;
+}
+
+/* Are all the boxes after slot s (in text order) already filled? */
+static int rest_filled(const Item *it, int s)
+{
+    for (int n = text_next_slot(it, s); n >= 0; n = text_next_slot(it, n))
+        if (it->slot[n]->len == 0)
+            return 0;
+    return 1;
+}
+
+static void leave(Editor *e, Item *owner)
+{
+    e->row = owner->row;
+    e->pos = item_index(owner) + 1;
+}
+
+static const char *const WORDS[] = {"sum", "prod", "sqrt", "root", "cbrt", "abs", "exp", "frac", "pi"};
+
+void ed_type(Editor *e, const char *ch)
+{
+    int fresh = e->fresh;
+    e->fresh = 0;
+    char c = ch[1] == '\0' ? ch[0] : 0;
+
+    if (c == '(' && fresh) {
+        /* "sum(" or "1/(": the box is already open; now ")" closes it. */
+        if (e->row->owner)
+            e->row->owner->closes = CLOSE_ON_PAREN;
+        return;
+    }
+
+    /* An operator ends a denominator or exponent that was typed without
+     * parentheses ("1/2+3" is a half plus three), possibly several levels. */
+    while (c && strchr("+-*/%,)=", c) && e->row->owner &&
+           e->row->owner->closes == CLOSE_ON_OPERATOR && !open_paren(e->row, e->pos) &&
+           !(c == '-' && e->row->len == 0))
+        leave(e, e->row->owner);
+
+    if (c == '/') {
+        ed_insert_template(e, IT_FRAC, 1);
+        e->row->owner->closes = CLOSE_ON_OPERATOR;
+        e->fresh = 1;
+        return;
+    }
+    if (c == '^') {
+        ed_insert_pow(e, NULL);
+        e->row->owner->closes = CLOSE_ON_OPERATOR;
+        e->fresh = 1;
+        return;
+    }
+
+    Item *owner = e->row->owner;
+    if (owner && !open_paren(e->row, e->pos)) {
+        int s = slot_index(owner, e->row);
+        int is_big = owner->kind == IT_SUM || owner->kind == IT_PROD;
+        int next = text_next_slot(owner, s);
+        if ((c == ',' || (c == '=' && is_big && s == 0)) && next >= 0) {
+            e->row = owner->slot[next];
+            e->pos = e->row->len;
+            return;
+        }
+        if (c == ')' && e->pos == e->row->len && rest_filled(owner, s)) {
+            leave(e, owner);
+            return;
+        }
+    }
+
+    ed_insert_text(e, ch);
+
+    for (size_t w = 0; w < sizeof WORDS / sizeof *WORDS; w++) {
+        const char *word = WORDS[w];
+        if (!word_before(e->row, e->pos, word))
+            continue;
+        for (size_t i = 0; i < strlen(word); i++) {
+            item_free(row_remove(e->row, e->pos - 1));
+            e->pos--;
+        }
+        if (strcmp(word, "sum") == 0) {
+            open_template(e, IT_SUM, 0);
+        } else if (strcmp(word, "prod") == 0) {
+            open_template(e, IT_PROD, 0);
+        } else if (strcmp(word, "sqrt") == 0) {
+            open_template(e, IT_SQRT, 0);
+        } else if (strcmp(word, "root") == 0) {
+            open_template(e, IT_ROOT, 1);
+        } else if (strcmp(word, "cbrt") == 0) {
+            Item *it = open_template(e, IT_ROOT, 1);
+            int p = 0;
+            insert_text_into(it->slot[0], &p, "3");
+        } else if (strcmp(word, "abs") == 0) {
+            open_template(e, IT_ABS, 0);
+        } else if (strcmp(word, "frac") == 0) {
+            open_template(e, IT_FRAC, 0);
+        } else if (strcmp(word, "exp") == 0) {
+            ed_insert_text(e, "e");
+            ed_insert_pow(e, NULL);
+            e->row->owner->closes = CLOSE_ON_PAREN;
+            e->fresh = 1;
+        } else {
+            ed_insert_text(e, "\xCF\x80");   /* pi -> π */
+        }
+        return;
+    }
+}
+
+void ed_tab(Editor *e, int dir)
+{
+    Item *owner = e->row->owner;
+    if (!owner) {
+        /* At the top level, jump into the nearest template that way. */
+        if (dir > 0) {
+            for (int i = e->pos; i < e->row->len; i++) {
+                Item *it = e->row->items[i];
+                if (it->nslots) {
+                    e->row = it->slot[0];
+                    e->pos = e->row->len;
+                    return;
+                }
+            }
+        } else {
+            for (int i = e->pos - 1; i >= 0; i--) {
+                Item *it = e->row->items[i];
+                if (it->nslots) {
+                    e->row = it->slot[it->nslots - 1];
+                    e->pos = e->row->len;
+                    return;
+                }
+            }
+        }
+        return;
+    }
+    int s = slot_index(owner, e->row) + (dir > 0 ? 1 : -1);
+    if (s >= 0 && s < owner->nslots) {
+        e->row = owner->slot[s];
+        e->pos = e->row->len;
+    } else {
+        e->row = owner->row;
+        e->pos = item_index(owner) + (dir > 0 ? 1 : 0);
     }
 }
 
@@ -445,7 +663,10 @@ static void ser_item(const Item *it, Buf *b, int *empty)
     case IT_SUM:
     case IT_PROD:
         put(b, it->kind == IT_SUM ? "sum(" : "prod(");
-        ser_slot(it, 0, b, empty);
+        if (it->slot[0]->len)
+            ser_row(it->slot[0], b, empty);
+        else
+            put(b, "k");
         put(b, "=");
         ser_slot(it, 1, b, empty);
         put(b, ", ");

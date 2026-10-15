@@ -183,6 +183,11 @@ static int int_power(Value *out, const Value *a, int64_t n, int exact, Ctx *c)
         out->exact = exact;
         return 0;
     }
+    if (n == 0) {   /* anything to the exact power 0 is exactly 1 */
+        rat_set_i64(&out->r, 1);
+        out->exact = 1;
+        return 0;
+    }
     double digits = fabs((double)n) * rat_size_log10(&a->r);
     if (a->exact) {
         if (digits > MAX_RESULT_DIGITS)

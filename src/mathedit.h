@@ -36,7 +36,12 @@ struct Item {
     int nslots;
     Row *slot[4];
     Row *row;         /* the row this item sits in */
+    int closes;       /* text mode: CLOSE_ON_OPERATOR or CLOSE_ON_PAREN, else 0 */
 };
+
+/* How a template typed as text knows where it ends. "1/2+3" leaves the
+ * denominator at "+"; "1/(2+3)" and "sqrt(2)" leave it at the ")". */
+enum { CLOSE_ON_OPERATOR = 1, CLOSE_ON_PAREN = 2 };
 
 struct Row {
     Item **items;
@@ -48,6 +53,7 @@ typedef struct {
     Row *root;
     Row *row;   /* row the cursor is in */
     int pos;    /* cursor sits before row->items[pos] */
+    int fresh;  /* a template was just opened by ed_type(); a "(" next is absorbed */
 } Editor;
 
 void ed_init(Editor *e);
@@ -69,6 +75,19 @@ void ed_insert_template(Editor *e, ItemKind kind, int grab);
 /* x^exponent: with text, fills the exponent and leaves the cursor after it. */
 void ed_insert_pow(Editor *e, const char *exponent);
 
+/*
+ * Types one character the way text mode does: names like sum, prod, sqrt,
+ * root, cbrt, abs, exp and frac become templates as soon as they're typed
+ * (and pi becomes π); "/" and "^" make a fraction and a power. Inside a
+ * template, "," (and "=" after a sum's variable) moves to the next box and
+ * ")" leaves the template, so "sum(k=1, 10, k^2)" typed or pasted as text
+ * builds the same thing as the buttons do.
+ */
+void ed_type(Editor *e, const char *utf8_char);
+
+/* Tab: jump to the next box (dir > 0) or the previous one. */
+void ed_tab(Editor *e, int dir);
+
 void ed_left(Editor *e);
 void ed_right(Editor *e);
 void ed_home(Editor *e);
@@ -85,7 +104,8 @@ void row_free(Row *r);
 
 /*
  * Text for the calculator engine, e.g. "((1)/(2))+3" (malloc'd). Sets
- * *empty_box if any box was left empty.
+ * *empty_box if any box was left empty. A sum or product with no variable
+ * uses k.
  */
 char *ed_serialize(const Row *r, int *empty_box);
 

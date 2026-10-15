@@ -63,6 +63,16 @@ way it looks on paper, and the answer appears in the bottom right.
   them to decimals.
 - Starting with an operator continues from the last answer (`×3` becomes
   `Ans×3`).
+- Tab and Shift+Tab move to the next and previous box.
+
+The **KEYS/TEXT** switch hides the buttons for typing everything. In TEXT
+mode the calculator syntax from the terminal version turns into templates as
+you type: `sum` becomes Σ, and so do `prod`, `sqrt`, `root`, `cbrt`, `abs`,
+`exp`, `frac` and `pi`. Inside a template, `,` (or `=` after a sum's
+variable) moves to the next box and `)` leaves it, so typing or pasting
+`sum(k=1, 10, k^2)` builds the Σ with its boxes filled in. `1/2+3` and
+`2^10-1` follow normal precedence, ending the fraction or power at the
+operator.
 
 Run it from the repository folder, or keep the `assets` folder next to
 `calc-gui`, so it can find its font.

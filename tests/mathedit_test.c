@@ -141,6 +141,59 @@ int main(void)
     row_free(copy);
     check("clone and load", &e, "((10)/(2))", "5");
 
+    /* Text mode: typing the CLI syntax builds templates. */
+    struct {
+        const char *typed, *text, *value;
+    } typed[] = {
+        {"sum(k=1, 10, k^2)", "sum(k=1, 10, k^(2))", "385"},
+        {"sum(k,1,10,k)", "sum(k=1, 10, k)", "55"},   /* the CLI's other form */
+        {"1/2+3", "((1)/(2))+3", "3.5"},
+        {"1/2^3*4", "((1)/(2^(3)))*4", "0.5"},
+        {"2^10-1", "2^(10)-1", "1023"},
+        {"2^-1", "2^(-1)", "0.5"},
+        {"1/2/4", "((((1)/(2)))/(4))", "0.125"},
+        {"prod(n=1,5,n)+1", "prod(n=1, 5, n)+1", "121"},
+        {"sqrt(16)+cbrt(27)", "sqrt(16)+root(27, 3)", "7"},
+        {"root(32,5)", "root(32, 5)", "2"},
+        {"abs(-3)*2", "abs(-3)*2", "6"},
+        {"1/(2+3)+1", "((1)/(2+3))+1", "1.2"},
+        {"(1+2)/3", "(((1+2))/(3))", "1"},
+        {"2^(3+1)", "2^(3+1)", "16"},
+        {"sum(k=1,3,gcd(k,6))", "sum(k=1, 3, gcd(k,6))", "6"},
+        {"exp(0)+pi*0", "e^(0)+\xCF\x80*0", "1"},
+        {"sumx", "sum(x=, , )", NULL},   /* x goes in the variable box */
+    };
+    for (size_t i = 0; i < sizeof typed / sizeof *typed; i++) {
+        ed_clear(&e);
+        for (const char *p = typed[i].typed; *p; p++) {
+            char ch[2] = {*p, '\0'};
+            if (*p != ' ')
+                ed_type(&e, ch);
+        }
+        check(typed[i].typed, &e, typed[i].text, typed[i].value);
+    }
+
+    /* "sumx" is not a sum when the letters are part of a longer word. */
+    ed_clear(&e);
+    for (const char *p = "xsum"; *p; p++) {
+        char ch[2] = {*p, '\0'};
+        ed_type(&e, ch);
+    }
+    check("word boundary", &e, "xsum", NULL);
+
+    /* Tab walks through the boxes and out. */
+    ed_clear(&e);
+    ed_insert_template(&e, IT_FRAC, 0);
+    ed_insert_text(&e, "3");
+    ed_tab(&e, 1);
+    ed_insert_text(&e, "4");
+    ed_tab(&e, 1);
+    ed_insert_text(&e, "+1");
+    ed_home(&e);
+    ed_tab(&e, 1);   /* from the start, Tab enters the fraction */
+    ed_insert_text(&e, "0");
+    check("tab", &e, "((30)/(4))+1", "8.5");
+
     ed_free(&e);
     calc_free(&calc);
     printf("%d passed, %d failed\n", pass, fail);

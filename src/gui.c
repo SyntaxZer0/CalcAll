@@ -8,9 +8,13 @@
  * The result appears in the bottom right of the screen.
  *
  * Keyboard: type normally; "/" makes a fraction from the number before it,
- * "^" makes a power. Arrows move between boxes, Up/Down also replays
- * earlier calculations, Enter evaluates, Esc clears, Cmd/Ctrl+C copies the
- * result, Cmd/Ctrl+V pastes text.
+ * "^" makes a power. Arrows and Tab move between boxes, Up/Down also
+ * replays earlier calculations, Enter evaluates, Esc clears, Cmd/Ctrl+C
+ * copies the result, Cmd/Ctrl+V pastes text.
+ *
+ * The KEYS/TEXT switch hides the buttons. In TEXT mode, names typed in
+ * calculator syntax turn into templates as you type (see ed_type()), so
+ * "sum(k=1, 10, k^2)" becomes a Σ with its boxes filled in.
  */
 #include <math.h>
 #include <stdio.h>
@@ -68,6 +72,7 @@ static Entry history[MAX_HISTORY];
 static int nhistory;
 static int shown = -1;        /* history entry whose result is on screen; -1 while editing */
 static int show_fraction = 1; /* S<=>D: exact fractions as a/b instead of decimals */
+static int text_mode;         /* TEXT: no buttons; typed names like "sum" become templates */
 static char error_text[300];  /* last error, shown until the next edit */
 static float hscroll;         /* sideways scroll of a long expression */
 static int any_hover;
@@ -884,9 +889,13 @@ static void command(const char *cmd)
 
 static void draw_modebar(Rectangle area)
 {
-    float unit = (area.width - 4 * GAP) / 5.6f;
+    float unit = (area.width - 5 * GAP) / 6.6f;
     Rectangle r = {area.x, area.y, unit, area.height};
     char label[32];
+
+    if (text_button(r, text_mode ? "TEXT" : "KEYS", COL_ACCENT, 15))
+        text_mode = !text_mode;
+    r.x += unit + GAP;
 
     if (text_button(r, calc.degrees ? "DEG" : "RAD", COL_TOGGLE, 15))
         command(calc.degrees ? ":rad" : ":deg");
@@ -964,11 +973,24 @@ static void handle_key(int key)
         }
         break;
     }
+    case KEY_TAB:
+        if (shown >= 0)
+            ed_home(&ed);
+        ed_tab(&ed, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ? -1 : 1);
+        resume_edit();
+        break;
     case KEY_ESCAPE:
         ed_clear(&ed);
         resume_edit();
         break;
     }
+}
+
+/* Text mode: one character through the editor's typing rules (ed_type). */
+static void type_char_text(const char *utf8)
+{
+    begin_edit(utf8[1] == '\0' && strchr("+-*/^!%", utf8[0]) != NULL);
+    ed_type(&ed, utf8);
 }
 
 static void handle_keys(void)
@@ -980,7 +1002,14 @@ static void handle_keys(void)
     while ((cp = GetCharPressed()) > 0) {
         if (mod || cp == ' ')
             continue;
-        if (cp == '/') {   /* "12/" makes a fraction with 12 on top */
+        if (text_mode) {
+            int n;
+            char utf8[8];
+            const char *bytes = CodepointToUTF8(cp, &n);
+            memcpy(utf8, bytes, (size_t)n);
+            utf8[n] = '\0';
+            type_char_text(utf8);
+        } else if (cp == '/') {   /* "12/" makes a fraction with 12 on top */
             begin_edit(1);
             ed_insert_template(&ed, IT_FRAC, 1);
         } else if (cp == '^') {
@@ -1007,7 +1036,21 @@ static void handle_keys(void)
                 if (clip[i] != '\n' && clip[i] != '\r' && clip[i] != '\t')
                     buf[j++] = clip[i];
             buf[j] = '\0';
-            type_text(buf);
+            if (text_mode) {
+                /* Pasting "sum(k=1, 10, k^2)" builds the template too. */
+                for (const char *p = buf; *p;) {
+                    unsigned char c = (unsigned char)*p;
+                    int n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+                    char one[8] = {0};
+                    for (int k = 0; k < n && p[k]; k++)
+                        one[k] = p[k];
+                    if (*p != ' ')
+                        type_char_text(one);
+                    p += strlen(one);
+                }
+            } else {
+                type_text(buf);
+            }
         }
     }
 
@@ -1032,7 +1075,7 @@ static Font load_font(void)
         "abcdefghijklmnopqrstuvwxyz{|}~"
         "\xE2\x89\x88\xCF\x80\xCE\xA3\xCE\xA0\xE2\x88\x91\xE2\x88\x8F\xE2\x88\x9A"
         "\xC3\xB7\xC3\x97\xE2\x88\x92\xE2\x8C\xAB\xCA\xB8\xE2\x80\xA6\xE2\x81\xBB\xC2\xB9"
-        "\xE2\x87\x94";
+        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7";
     int count;
     int *cps = LoadCodepoints(chars, &count);
 
@@ -1070,7 +1113,7 @@ int main(void)
         handle_keys();
 
         float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
-        float keys_h = H * 0.6f;
+        float keys_h = text_mode ? 40 : H * 0.6f;   /* text mode: room for a hint, no buttons */
         Rectangle screen = {PAD, PAD, W - 2 * PAD, H - keys_h - MODEBAR_H - 3 * PAD};
         Rectangle modebar = {PAD, screen.y + screen.height + PAD, W - 2 * PAD, MODEBAR_H};
         float gy = modebar.y + MODEBAR_H + PAD;
@@ -1083,8 +1126,17 @@ int main(void)
         ClearBackground(COL_BG);
         draw_screen(screen);
         draw_modebar(modebar);
-        draw_grid(FN_BUTTONS, sizeof FN_BUTTONS / sizeof *FN_BUTTONS, 6, fn_area);
-        draw_grid(NUM_BUTTONS, sizeof NUM_BUTTONS / sizeof *NUM_BUTTONS, 5, num_area);
+        if (text_mode) {
+            const char *hint[] = {
+                "sum prod sqrt root cbrt abs exp frac pi \xE2\x86\x92 templates",
+                "Tab or , next box \xC2\xB7 ) leave \xC2\xB7 / fraction \xC2\xB7 ^ power",
+            };
+            for (int i = 0; i < 2; i++)
+                DrawTextEx(font, hint[i], (Vector2){PAD + 4, gy - 2 + (float)i * 17}, 13, 0, COL_MUTED);
+        } else {
+            draw_grid(FN_BUTTONS, sizeof FN_BUTTONS / sizeof *FN_BUTTONS, 6, fn_area);
+            draw_grid(NUM_BUTTONS, sizeof NUM_BUTTONS / sizeof *NUM_BUTTONS, 5, num_area);
+        }
         SetMouseCursor(any_hover ? MOUSE_CURSOR_POINTING_HAND : MOUSE_CURSOR_DEFAULT);
         EndDrawing();
     }
