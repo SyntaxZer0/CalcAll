@@ -1,3 +1,4 @@
 calc
 calc-gui
+tests/mathedit_test
 *.o

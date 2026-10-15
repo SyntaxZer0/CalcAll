@@ -102,6 +102,12 @@ check 'tan(pi/2)' 'error: tan is undefined here (cos is 0)'
 check 'round(2.5)' 3
 check 'round(-2.5)' -3
 
+# Implicit multiplication
+check '2(3+4)' 14
+check '(1+2)(3+4)' 21
+check '2pi' '≈ 6.2831853071795864769'
+session 15 '5' '3Ans'
+
 # Errors
 check '1/0' 'error: division by zero'
 check '(1 + 2' "error: expected ')' but the input ended (at column 7)"

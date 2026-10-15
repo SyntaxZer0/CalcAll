@@ -3,7 +3,7 @@
  * operators that bind tighter are called from rules that bind looser:
  *
  *   expr    := term (('+' | '-') term)*
- *   term    := unary (('*' | '/' | '%') unary)*
+ *   term    := unary (('*' | '/' | '%')? unary)*   no operator: 2pi = 2*pi
  *   unary   := ('-' | '+') unary | power
  *   power   := postfix ('^' unary)?          right-associative: 2^3^2 = 2^9
  *   postfix := primary '!'*
@@ -342,9 +342,29 @@ static Node *parse_chain(Parser *P, const char *ops, Node *(*sub)(Parser *))
     return l;
 }
 
+/* With no operator between them, two operands multiply: 2pi, 3(4+1),
+ * 2sin(30), as on a calculator. */
 static Node *parse_term(Parser *P)
 {
-    return parse_chain(P, "*/%", parse_unary);
+    Node *l = parse_unary(P);
+    while (l) {
+        char op;
+        if (P->tok.kind == T_OP && strchr("*/%", P->tok.op)) {
+            op = P->tok.op;
+            next(P);
+        } else if (P->tok.kind == T_NUM || P->tok.kind == T_NAME || is_op(P, '(')) {
+            op = '*';
+        } else {
+            break;
+        }
+        Node *r = parse_unary(P);
+        if (!r) {
+            node_free(l);
+            return NULL;
+        }
+        l = binop(op, l, r);
+    }
+    return l;
 }
 
 static Node *parse_expr(Parser *P)

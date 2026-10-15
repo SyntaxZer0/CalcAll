@@ -21,13 +21,17 @@ endif
 
 gui: calc-gui
 
-calc-gui: $(ENGINE) src/gui.c $(HDR)
-	$(CC) $(CFLAGS) $(RAYLIB_CFLAGS) -o $@ $(ENGINE) src/gui.c $(RAYLIB_LIBS) $(GUI_SYSLIBS) $(LDLIBS)
+calc-gui: $(ENGINE) src/mathedit.c src/gui.c $(HDR)
+	$(CC) $(CFLAGS) $(RAYLIB_CFLAGS) -o $@ $(ENGINE) src/mathedit.c src/gui.c $(RAYLIB_LIBS) $(GUI_SYSLIBS) $(LDLIBS)
 
-test: calc
+test: calc tests/mathedit_test
 	sh tests/run_tests.sh ./calc
+	./tests/mathedit_test
+
+tests/mathedit_test: tests/mathedit_test.c $(ENGINE) src/mathedit.c $(HDR)
+	$(CC) $(CFLAGS) -o $@ tests/mathedit_test.c $(ENGINE) src/mathedit.c $(LDLIBS)
 
 clean:
-	rm -f calc calc-gui
+	rm -f calc calc-gui tests/mathedit_test
 
 .PHONY: gui test clean

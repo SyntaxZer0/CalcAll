@@ -50,11 +50,22 @@ make gui
 ./calc-gui
 ```
 
-Type expressions or use the buttons. Enter evaluates, Up/Down recalls earlier
-input, Esc clears, and Cmd+C copies the last result. Click an earlier line to
-edit it again. Starting a line with an operator continues from the last
-answer (`+ 1` means `ans + 1`). Run it from the repository folder, or keep
-the `assets` folder next to `calc-gui`, so it can find its font.
+The screen works like a Casio "natural display": the expression is drawn the
+way it looks on paper, and the answer appears in the bottom right.
+
+- The fraction, root, power, log and |x| buttons insert templates with boxes to
+  fill in. Σ and Π put the upper limit on top and `k=` the start below.
+- Arrow keys move between boxes; Up/Down move between the top and bottom of a
+  fraction or sum, and otherwise replay earlier calculations.
+- On the keyboard, `/` turns the number before it into a numerator and `^`
+  starts a power. Enter evaluates, Esc clears, Cmd+C copies the result.
+- Exact answers that aren't whole numbers show as fractions; S⇔D switches
+  them to decimals.
+- Starting with an operator continues from the last answer (`×3` becomes
+  `Ans×3`).
+
+Run it from the repository folder, or keep the `assets` folder next to
+`calc-gui`, so it can find its font.
 
 ## What it understands
 
@@ -69,7 +80,8 @@ the `assets` folder next to `calc-gui`, so it can find its font.
 | Sum | `sum(k=1, 100, k^2)` or `Σ(k=1, 100, k^2)` |
 | Product | `prod(k=1, 10, k)` or `Π(k=1, 10, k)` |
 | Other | `abs floor ceil round gcd lcm choose(n,k) perm(n,k)` |
-| Variables | `ans` holds the previous result |
+| Variables | `ans` (or `Ans`) holds the previous result |
+| Implicit × | `2pi`, `3(4+1)`, `2sin(30)` multiply |
 | Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:help`, `:quit` |
 
 Approximate results are computed with 10 more digits than are shown, so
@@ -85,7 +97,8 @@ src/parser.c    text -> expression tree (recursive descent)
 src/eval.c      walks the tree; tracks exact vs approximate; all functions
 src/calc.c      the engine API a front end calls: calc_eval(line) -> text
 src/main.c      the terminal front end
-src/gui.c       the raylib front end
+src/mathedit.c  the natural-display editor: templates, cursor, to-text
+src/gui.c       the raylib front end: draws the templates and buttons
 ```
 
 Both front ends only use `calc.h`: they pass a line of text to `calc_eval`

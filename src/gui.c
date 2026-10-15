@@ -1,13 +1,18 @@
 /*
- * Graphical front end, drawn with raylib (https://www.raylib.com).
+ * Graphical front end in the style of a Casio "natural display" calculator,
+ * drawn with raylib (https://www.raylib.com).
  *
- * Like main.c, it only uses the engine through calc.h: every button press
- * edits a line of text, and "=" hands that line to calc_eval().
+ * The expression at the top is a tree from mathedit.h: fractions, roots,
+ * powers and sums are templates with boxes to fill in. Pressing "="
+ * serializes the tree to text and hands it to calc_eval(), like main.c does.
+ * The result appears in the bottom right of the screen.
  *
- * Keyboard: type expressions directly, Enter evaluates, Up/Down recall
- * earlier input, Esc clears, Cmd/Ctrl+C copies the last result, Cmd/Ctrl+V
- * pastes. Clicking an earlier line puts it back in the input for editing.
+ * Keyboard: type normally; "/" makes a fraction from the number before it,
+ * "^" makes a power. Arrows move between boxes, Up/Down also replays
+ * earlier calculations, Enter evaluates, Esc clears, Cmd/Ctrl+C copies the
+ * result, Cmd/Ctrl+V pastes text.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,74 +20,714 @@
 #include "raylib.h"
 
 #include "calc.h"
+#include "mathedit.h"
 
-#define MAX_INPUT 4096
-#define MAX_HISTORY 200
-#define MAX_SHOWN_BYTES 20000   /* longer results are cut off on screen (copy gets all) */
+#define MAX_HISTORY 100
 #define FONT_FILE "DejaVuSansMono.ttf"
 
-/* ---- Colors and sizes ----------------------------------------------------- */
+/* ---- Colors and sizes ------------------------------------------------------ */
 
-#define COL_BG       (Color){24, 26, 31, 255}
-#define COL_PANEL    (Color){33, 36, 43, 255}
-#define COL_TEXT     (Color){232, 234, 240, 255}
-#define COL_MUTED    (Color){138, 144, 158, 255}
-#define COL_ERROR    (Color){240, 113, 113, 255}
-#define COL_CURSOR   (Color){255, 170, 70, 255}
-#define COL_NUM      (Color){58, 62, 72, 255}
-#define COL_OP       (Color){74, 80, 96, 255}
-#define COL_FN       (Color){45, 49, 58, 255}
-#define COL_CTRL     (Color){110, 62, 66, 255}
-#define COL_ACCENT   (Color){230, 140, 40, 255}
-#define COL_TOGGLE   (Color){52, 86, 130, 255}
+#define COL_BG      (Color){24, 26, 31, 255}
+#define COL_SCREEN  (Color){33, 36, 43, 255}
+#define COL_TEXT    (Color){232, 234, 240, 255}
+#define COL_MUTED   (Color){138, 144, 158, 255}
+#define COL_BOX     (Color){112, 118, 134, 255}
+#define COL_ERROR   (Color){240, 113, 113, 255}
+#define COL_CURSOR  (Color){255, 170, 70, 255}
+#define COL_NUM     (Color){58, 62, 72, 255}
+#define COL_OP      (Color){74, 80, 96, 255}
+#define COL_FN      (Color){45, 49, 58, 255}
+#define COL_CTRL    (Color){110, 62, 66, 255}
+#define COL_ACCENT  (Color){230, 140, 40, 255}
+#define COL_TOGGLE  (Color){52, 86, 130, 255}
 
 #define PAD 12.0f
-#define GAP 8.0f
-#define MODEBAR_H 34.0f
-#define EXPR_SIZE 18.0f
-#define RESULT_SIZE 24.0f
-#define INPUT_SIZE 30.0f
+#define GAP 7.0f
+#define MODEBAR_H 32.0f
+#define EXPR_SIZE 34.0f
+#define MIN_SIZE 12.0f
 
-/* ---- Buttons -------------------------------------------------------------- */
+/* Font metrics as fractions of the font size (DejaVu Sans Mono). */
+#define BASELINE 0.80f   /* baseline, measured down from the top of a text line */
+#define ASC 0.68f        /* height of digits and capitals above the baseline */
+#define DESC 0.20f       /* depth of descenders below the baseline */
+#define AXIS 0.30f       /* height of the minus sign / fraction bar above the baseline */
 
-enum { ACT_INSERT, ACT_EVAL, ACT_CLEAR, ACT_BACKSPACE };
+/* ---- State ------------------------------------------------------------------- */
+
+typedef struct {
+    Row *expr;
+    Value val;
+    char *message;   /* set instead of val for commands like ":digits 30" */
+} Entry;
+
+static Font font;
+static Calc calc;
+static Editor ed;
+static Entry history[MAX_HISTORY];
+static int nhistory;
+static int shown = -1;        /* history entry whose result is on screen; -1 while editing */
+static int show_fraction = 1; /* S<=>D: exact fractions as a/b instead of decimals */
+static char error_text[300];  /* last error, shown until the next edit */
+static float hscroll;         /* sideways scroll of a long expression */
+static int any_hover;
+
+static Row *icons[8];         /* little expressions drawn on template buttons */
+
+/* ---- Text helpers ------------------------------------------------------------ */
+
+static float tw(const char *s, float size)
+{
+    return MeasureTextEx(font, s, size, 0).x;
+}
+
+/* Draws text with its baseline at `base`. */
+static void text_at(const char *s, float x, float base, float size, Color c)
+{
+    DrawTextEx(font, s, (Vector2){x, base - BASELINE * size}, size, 0, c);
+}
+
+static float sub_size(float s, float k)
+{
+    return s * k < MIN_SIZE ? MIN_SIZE : s * k;
+}
+
+static float thickness(float s)
+{
+    return s * 0.055f < 1.5f ? 1.5f : s * 0.055f;
+}
+
+static float maxf(float a, float b)
+{
+    return a > b ? a : b;
+}
+
+static char *dup(const char *s)
+{
+    char *d = malloc(strlen(s) + 1);
+    if (!d) {
+        fputs("calc: out of memory\n", stderr);
+        exit(1);
+    }
+    return strcpy(d, s);
+}
+
+/* ---- Natural display layout ---------------------------------------------------- */
+
+typedef struct {
+    float w, asc, desc;   /* width, height above the baseline, depth below it */
+} Box;
+
+static const Editor *caret_ed;   /* editor whose cursor is being drawn, if any */
+static Rectangle caret;
+static int caret_found;
+
+static Box layout_row(const Row *r, float s, int draw, float x, float base, Color c);
+
+static Box measure(const Row *r, float s)
+{
+    return layout_row(r, s, 0, 0, 0, BLANK);
+}
+
+static const char *display_char(const char *ch)
+{
+    if (strcmp(ch, "*") == 0)
+        return "\xC3\x97";   /* × */
+    if (strcmp(ch, "-") == 0)
+        return "\xE2\x88\x92";   /* − */
+    if (strcmp(ch, "/") == 0)
+        return "\xC3\xB7";   /* ÷ */
+    return ch;
+}
+
+/* Font size for parentheses tall enough to wrap the content. */
+static float paren_size(Box content, float s)
+{
+    return maxf(s, (content.asc + content.desc) / (ASC + DESC) * 0.95f);
+}
+
+static void draw_paren(const char *p, float x, float base, Box content, float ps, Color c)
+{
+    /* Center the parenthesis on the content's vertical middle. */
+    float mid = base - (content.asc - content.desc) / 2;
+    text_at(p, x, mid + (BASELINE - 0.5f) * ps, ps, c);
+}
+
+/* The √ sign: a short tick, a down stroke, a long up stroke, then the bar. */
+static void draw_radical(float x, float base, float s, float top, float bottom, float end, Color c)
+{
+    float th = thickness(s);
+    Vector2 a = {x, base - 0.26f * s};
+    Vector2 b = {x + 0.12f * s, base - 0.33f * s};
+    Vector2 d = {x + 0.27f * s, bottom};
+    Vector2 e = {x + 0.5f * s, top};
+    Vector2 f = {end, top};
+    DrawLineEx(a, b, th, c);
+    DrawLineEx(b, d, th * 1.3f, c);
+    DrawLineEx(d, e, th, c);
+    DrawLineEx(e, f, th, c);
+}
+
+static float prev_asc;   /* height of the item before the current one, for exponents */
+
+static Box layout_item(const Item *it, float s, int draw, float x, float base, Color c)
+{
+    float th = thickness(s);
+    Box b = {0, ASC * s, DESC * s};
+
+    switch (it->kind) {
+    case IT_CHAR: {
+        const char *t = display_char(it->ch);
+        b.w = tw(t, s);
+        if (draw)
+            text_at(t, x, base, s, c);
+        break;
+    }
+
+    case IT_FRAC: {
+        float gap = 0.12f * s;
+        Box n = measure(it->slot[0], s * 0.92f), d = measure(it->slot[1], s * 0.92f);
+        float axis = base - AXIS * s;
+        float nbase = axis - gap - n.desc, dbase = axis + th + gap + d.asc;
+        b.w = maxf(n.w, d.w) + 0.4f * s;
+        b.asc = base - (nbase - n.asc);
+        b.desc = dbase + d.desc - base;
+        if (draw) {
+            DrawRectangleRec((Rectangle){x + 0.1f * s, axis, b.w - 0.2f * s, th}, c);
+            layout_row(it->slot[0], s * 0.92f, 1, x + (b.w - n.w) / 2, nbase, c);
+            layout_row(it->slot[1], s * 0.92f, 1, x + (b.w - d.w) / 2, dbase, c);
+        }
+        break;
+    }
+
+    case IT_POW: {
+        float es = sub_size(s, 0.66f);
+        Box e = measure(it->slot[0], es);
+        /* Sit above whatever precedes it, even a tall fraction. */
+        float raise = maxf(0.42f * s, prev_asc - 0.3f * s);
+        b.w = e.w + 0.06f * s;
+        b.asc = maxf(ASC * s, raise + e.asc);
+        b.desc = maxf(0, e.desc - raise);
+        if (draw)
+            layout_row(it->slot[0], es, 1, x + 0.03f * s, base - raise, c);
+        break;
+    }
+
+    case IT_SQRT:
+    case IT_ROOT: {
+        int has_index = it->kind == IT_ROOT;
+        const Row *rad = it->slot[has_index ? 1 : 0];
+        Box r = measure(rad, s);
+        float is = sub_size(s, 0.55f);
+        Box idx = has_index ? measure(it->slot[0], is) : (Box){0, 0, 0};
+        float shift = has_index ? maxf(0, idx.w - 0.22f * s) : 0;
+        float lead = 0.55f * s;
+        float top = base - r.asc - 0.14f * s;
+        b.w = shift + lead + r.w + 0.12f * s;
+        b.asc = r.asc + 0.14f * s + th;
+        b.desc = r.desc + 0.06f * s;
+        float ibase = base - 0.4f * s;
+        if (has_index)
+            b.asc = maxf(b.asc, base - ibase + idx.asc);
+        if (draw) {
+            draw_radical(x + shift, base, s, top, base + r.desc + 0.04f * s, x + b.w, c);
+            layout_row(rad, s, 1, x + shift + lead, base, c);
+            if (has_index)
+                layout_row(it->slot[0], is, 1, x + shift + 0.22f * s - idx.w, ibase, c);
+        }
+        break;
+    }
+
+    case IT_SUM:
+    case IT_PROD: {
+        const char *sym = it->kind == IT_SUM ? "\xCE\xA3" : "\xCE\xA0";
+        float ss = s * 1.4f, ls = sub_size(s, 0.6f);
+        float sw = tw(sym, ss);
+        float sym_base = base - AXIS * s + 0.34f * ss;   /* centers the symbol on the axis */
+        float sym_top = sym_base - 0.72f * ss;
+        Box up = measure(it->slot[2], ls);
+        Box v = measure(it->slot[0], ls), lo = measure(it->slot[1], ls);
+        float eqw = tw("=", ls);
+        float lw = v.w + eqw + lo.w;
+        float lasc = maxf(maxf(v.asc, lo.asc), ASC * ls);
+        float ldesc = maxf(maxf(v.desc, lo.desc), DESC * ls);
+        float col = maxf(maxf(sw, up.w), lw) + 0.1f * s;
+        float up_base = sym_top - 0.08f * s - up.desc;
+        float lo_base = sym_base + 0.12f * s + lasc;
+        Box body = measure(it->slot[3], s);
+        float ps = paren_size(body, s), pw = tw("(", ps);
+        b.w = col + 0.08f * s + 2 * pw + body.w;
+        b.asc = maxf(base - up_base + up.asc, body.asc);
+        b.desc = maxf(lo_base - base + ldesc, body.desc);
+        if (draw) {
+            text_at(sym, x + (col - sw) / 2, sym_base, ss, c);
+            layout_row(it->slot[2], ls, 1, x + (col - up.w) / 2, up_base, c);
+            float lx = x + (col - lw) / 2;
+            layout_row(it->slot[0], ls, 1, lx, lo_base, c);
+            text_at("=", lx + v.w, lo_base, ls, c);
+            layout_row(it->slot[1], ls, 1, lx + v.w + eqw, lo_base, c);
+            float bx = x + col + 0.08f * s;
+            draw_paren("(", bx, base, body, ps, c);
+            layout_row(it->slot[3], s, 1, bx + pw, base, c);
+            draw_paren(")", bx + pw + body.w, base, body, ps, c);
+        }
+        break;
+    }
+
+    case IT_ABS: {
+        Box in = measure(it->slot[0], s);
+        b.w = in.w + 0.4f * s;
+        b.asc = maxf(in.asc, ASC * s) + 0.06f * s;
+        b.desc = maxf(in.desc, DESC * s) + 0.06f * s;
+        if (draw) {
+            DrawRectangleRec((Rectangle){x + 0.1f * s, base - b.asc, th, b.asc + b.desc}, c);
+            DrawRectangleRec((Rectangle){x + b.w - 0.1f * s - th, base - b.asc, th, b.asc + b.desc}, c);
+            layout_row(it->slot[0], s, 1, x + 0.2f * s, base, c);
+        }
+        break;
+    }
+
+    case IT_LOGB: {
+        float bs = sub_size(s, 0.6f);
+        float lw = tw("log", s);
+        Box bb = measure(it->slot[0], bs), arg = measure(it->slot[1], s);
+        float bbase = base + 0.25f * s;
+        float ps = paren_size(arg, s), pw = tw("(", ps);
+        b.w = lw + bb.w + 0.05f * s + 2 * pw + arg.w;
+        b.asc = maxf(ASC * s, arg.asc);
+        b.desc = maxf(maxf(DESC * s, bbase - base + bb.desc), arg.desc);
+        if (draw) {
+            text_at("log", x, base, s, c);
+            layout_row(it->slot[0], bs, 1, x + lw, bbase, c);
+            float ax = x + lw + bb.w + 0.05f * s;
+            draw_paren("(", ax, base, arg, ps, c);
+            layout_row(it->slot[1], s, 1, ax + pw, base, c);
+            draw_paren(")", ax + pw + arg.w, base, arg, ps, c);
+        }
+        break;
+    }
+    }
+    return b;
+}
+
+static void set_caret(float x, float base, float s)
+{
+    caret = (Rectangle){x, base - ASC * s - 0.08f * s, 2, (ASC + DESC + 0.12f) * s};
+    caret_found = 1;
+}
+
+/*
+ * Lays out a row at font size s. With `draw`, also draws it with its
+ * baseline at (x, base), and records where the cursor goes. Returns the size.
+ */
+static Box layout_row(const Row *r, float s, int draw, float x, float base, Color c)
+{
+    int is_cursor_row = draw && caret_ed && caret_ed->row == r;
+
+    if (r->len == 0) {
+        if (!r->owner) {   /* the empty top row: just a cursor */
+            if (is_cursor_row)
+                set_caret(x, base, s);
+            return (Box){0, ASC * s, DESC * s};
+        }
+        /* An empty box to fill in. */
+        Box e = {0.6f * s, 0.7f * s, 0.06f * s};
+        if (draw) {
+            Rectangle box = {x + 0.06f * s, base - e.asc, e.w - 0.12f * s, e.asc + e.desc};
+            DrawRectangleRec(box, Fade(COL_BOX, 0.25f));
+            DrawRectangleLinesEx(box, thickness(s) * 0.8f, is_cursor_row ? COL_CURSOR : COL_BOX);
+            if (is_cursor_row)
+                set_caret(x + 0.15f * s, base, s);
+        }
+        return e;
+    }
+
+    Box b = {0, ASC * s, DESC * s};
+    float cx = x;
+    prev_asc = ASC * s;
+    for (int i = 0; i < r->len; i++) {
+        if (is_cursor_row && caret_ed->pos == i)
+            set_caret(cx, base, s);
+        Box ib = layout_item(r->items[i], s, draw, cx, base, c);
+        prev_asc = ib.asc;
+        cx += ib.w;
+        b.asc = maxf(b.asc, ib.asc);
+        b.desc = maxf(b.desc, ib.desc);
+    }
+    if (is_cursor_row && caret_ed->pos == r->len)
+        set_caret(cx, base, s);
+    b.w = cx - x;
+    return b;
+}
+
+/* ---- Calculation ------------------------------------------------------------- */
+
+static void entry_free(Entry *e)
+{
+    row_free(e->expr);
+    val_free(&e->val);
+    free(e->message);
+}
+
+static void evaluate(void)
+{
+    if (ed_is_empty(&ed))
+        return;
+    int empty;
+    char *text = ed_serialize(ed.root, &empty);
+    if (empty) {
+        snprintf(error_text, sizeof error_text, "Fill in the empty box first");
+        free(text);
+        return;
+    }
+
+    char err[256];
+    char *out = calc_eval(&calc, text, err, sizeof err);
+    free(text);
+    if (!out) {
+        snprintf(error_text, sizeof error_text, "%s", err);
+        return;
+    }
+
+    if (nhistory == MAX_HISTORY) {
+        entry_free(&history[0]);
+        memmove(history, history + 1, (MAX_HISTORY - 1) * sizeof *history);
+        nhistory--;
+    }
+    Entry *e = &history[nhistory++];
+    e->expr = row_clone(ed.root);
+    val_init(&e->val);
+    e->message = NULL;
+    if (ed.root->items[0]->kind == IT_CHAR && ed.root->items[0]->ch[0] == ':')
+        e->message = dup(out);   /* a command, like ":digits 30" */
+    else
+        val_copy(&e->val, &calc.ans);
+    free(out);
+    shown = nhistory - 1;
+}
+
+/* Shows an earlier calculation (dir < 0: older). */
+static void replay(int dir)
+{
+    if (nhistory == 0)
+        return;
+    int i = shown >= 0 ? shown + dir : (dir < 0 ? nhistory - 1 : -1);
+    if (i < 0)
+        i = 0;
+    if (i >= nhistory)
+        return;
+    ed_load(&ed, history[i].expr);
+    shown = i;
+    error_text[0] = '\0';
+}
+
+/*
+ * Called before anything is typed. After a result, typing starts a new
+ * calculation; starting with an operator continues from Ans, as on a Casio.
+ */
+static void begin_edit(int continues)
+{
+    if (shown >= 0) {
+        ed_clear(&ed);
+        if (continues)
+            ed_insert_text(&ed, "Ans");
+        shown = -1;
+    }
+    error_text[0] = '\0';
+}
+
+/* Like begin_edit, but keeps the expression to edit it (arrows, delete). */
+static void resume_edit(void)
+{
+    shown = -1;
+    error_text[0] = '\0';
+}
+
+static void type_text(const char *s)
+{
+    begin_edit(strchr("+-*/^!%", s[0]) != NULL);
+    ed_insert_text(&ed, s);
+}
+
+/* ---- Results ---------------------------------------------------------------- */
+
+/* The current result as text, or NULL when there is none to show. */
+static char *result_text(int *is_fraction)
+{
+    *is_fraction = 0;
+    if (shown < 0)
+        return NULL;
+    Entry *e = &history[shown];
+    if (e->message)
+        return dup(e->message);
+    const Rational *r = &e->val.r;
+    if (e->val.exact && !rat_is_int(r) && show_fraction && !calc.sci &&
+        bi_num_digits(&r->num) + bi_num_digits(&r->den) <= 40) {
+        *is_fraction = 1;
+        char *n = bi_to_str(&r->num), *d = bi_to_str(&r->den);
+        char *s = malloc(strlen(n) + strlen(d) + 2);
+        sprintf(s, "%s/%s", n, d);
+        free(n);
+        free(d);
+        return s;
+    }
+    char *s = rat_to_str(r, calc.digits, calc.sci, e->val.exact);
+    char *note = strstr(s, "  (=");   /* "0.333...  (= 1/3)": S<=>D shows the fraction */
+    if (note)
+        *note = '\0';
+    return s;
+}
+
+static size_t utf8_len(const char *s)
+{
+    size_t n = 0;
+    for (; *s; s++)
+        n += ((unsigned char)*s & 0xC0) != 0x80;
+    return n;
+}
+
+/* Byte offset of the n-th character. */
+static size_t utf8_offset(const char *s, size_t n)
+{
+    size_t i = 0;
+    for (; s[i] && n; n--) {
+        i++;
+        while (s[i] && ((unsigned char)s[i] & 0xC0) == 0x80)
+            i++;
+    }
+    return i;
+}
+
+/* Right-aligned text in the bottom of `area`, wrapped, shrinking if needed. */
+static void draw_text_result(const char *s, Rectangle area, Color c)
+{
+    static const float sizes[] = {36, 28, 22, 18};
+    size_t n = utf8_len(s);
+    float size = 18, cw = 0;
+    size_t per_line = 1, max_lines = 1;
+    for (size_t i = 0; i < sizeof sizes / sizeof *sizes; i++) {
+        size = sizes[i];
+        cw = tw("0", size);   /* every character is this wide in a monospaced font */
+        per_line = (size_t)(area.width / cw);
+        max_lines = (size_t)(area.height / (size * 1.15f));
+        if (per_line < 1)
+            per_line = 1;
+        if (max_lines < 1)
+            max_lines = 1;
+        if ((n + per_line - 1) / per_line <= max_lines)
+            break;
+    }
+
+    size_t lines = (n + per_line - 1) / per_line;
+    char note[96] = "";
+    if (lines > max_lines) {
+        /* Too long even at the smallest size: show the start and how much is left. */
+        size_t kept = (max_lines - 1) * per_line;
+        snprintf(note, sizeof note, "\xE2\x80\xA6 %zu more (Copy gets all)", n - kept);
+        n = kept;
+        lines = max_lines - 1;
+    }
+
+    /* Lines are right-aligned, so a short line goes first and the number
+     * ends flush right; a cut-off result keeps its start instead. */
+    size_t first = note[0] || n % per_line == 0 ? per_line : n % per_line;
+    float line_h = size * 1.15f;
+    float y = area.y + area.height - (float)(lines + (note[0] ? 1 : 0)) * line_h;
+    char buf[1024];
+    size_t at = 0;
+    for (size_t l = 0; l < lines && at < n; l++) {
+        size_t count = l == 0 ? first : per_line;
+        if (count > n - at)
+            count = n - at;
+        size_t from = utf8_offset(s, at), to = utf8_offset(s, at + count);
+        size_t len = to - from < sizeof buf - 1 ? to - from : sizeof buf - 1;
+        memcpy(buf, s + from, len);
+        buf[len] = '\0';
+        DrawTextEx(font, buf, (Vector2){area.x + area.width - (float)count * cw, y + (float)l * line_h}, size,
+                   0, c);
+        at += count;
+    }
+    if (note[0])
+        DrawTextEx(font, note, (Vector2){area.x + area.width - tw(note, 16), y + (float)lines * line_h},
+                   16, 0, COL_MUTED);
+}
+
+/* A message (like an error), word-wrapped and right-aligned at the bottom. */
+static void draw_message(const char *s, Rectangle area, Color c)
+{
+    const float size = 20, line_h = size * 1.2f;
+    char lines[8][160];
+    int n = 0;
+    const char *p = s;
+    while (*p && n < 8) {
+        /* Take as many whole words as fit on this line. */
+        size_t fit = 0, i = 0;
+        char buf[160];
+        while (p[i] && i < sizeof buf - 1) {
+            size_t j = i;
+            while (p[j] && p[j] != ' ' && j < sizeof buf - 1)
+                j++;
+            memcpy(buf, p, j);
+            buf[j] = '\0';
+            if (fit && tw(buf, size) > area.width)
+                break;
+            fit = j;
+            i = p[j] == ' ' ? j + 1 : j;
+        }
+        if (!fit)
+            fit = i;
+        snprintf(lines[n++], sizeof lines[0], "%.*s", (int)fit, p);
+        p += fit;
+        while (*p == ' ')
+            p++;
+    }
+    float y = area.y + area.height - (float)n * line_h;
+    for (int i = 0; i < n; i++)
+        DrawTextEx(font, lines[i], (Vector2){area.x + area.width - tw(lines[i], size), y + (float)i * line_h},
+                   size, 0, c);
+}
+
+/* "a/b" drawn as a stacked fraction in the bottom right. */
+static void draw_fraction_result(const char *s, Rectangle area)
+{
+    float size = 34;
+    const char *slash = strchr(s, '/');
+    char num[64], den[64];
+    int neg = s[0] == '-';
+    snprintf(num, sizeof num, "%.*s", (int)(slash - s - neg), s + neg);
+    snprintf(den, sizeof den, "%s", slash + 1);
+    while (size > 16 && maxf(tw(num, size), tw(den, size)) + tw("\xE2\x88\x92", size) > area.width)
+        size -= 2;
+    float th = thickness(size);
+    float w = maxf(tw(num, size), tw(den, size)) + 0.3f * size;
+    float dbase = area.y + area.height - DESC * size;        /* denominator baseline */
+    float axis = dbase - ASC * size - 0.15f * size - th;     /* fraction bar */
+    float nbase = axis - 0.15f * size - DESC * size * 0.5f;  /* numerator baseline */
+    float x = area.x + area.width - w;
+    DrawRectangleRec((Rectangle){x, axis, w, th}, COL_TEXT);
+    text_at(num, x + (w - tw(num, size)) / 2, nbase, size, COL_TEXT);
+    text_at(den, x + (w - tw(den, size)) / 2, dbase, size, COL_TEXT);
+    if (neg) {
+        float mw = tw("\xE2\x88\x92", size);
+        text_at("\xE2\x88\x92", x - mw - 0.1f * size, axis + AXIS * size, size, COL_TEXT);
+    }
+}
+
+static void copy_result(void)
+{
+    int frac;
+    char *s = result_text(&frac);
+    if (s) {
+        SetClipboardText(strncmp(s, "\xE2\x89\x88 ", 4) == 0 ? s + 4 : s);   /* drop "≈ " */
+        free(s);
+    }
+}
+
+/* ---- Screen -------------------------------------------------------------------- */
+
+static void draw_screen(Rectangle area)
+{
+    DrawRectangleRounded(area, 0.05f, 8, COL_SCREEN);
+
+    /* Status line, like the indicators at the top of a Casio display. */
+    char status[64];
+    snprintf(status, sizeof status, "%s  %s  %s  %d digits", calc.degrees ? "DEG" : "RAD",
+             calc.sci ? "SCI" : "FIX", show_fraction ? "a/b" : "dec", calc.digits);
+    DrawTextEx(font, status, (Vector2){area.x + PAD, area.y + 6}, 13, 0, COL_MUTED);
+
+    /* The expression, top left, scrolled sideways to keep the cursor visible. */
+    Rectangle expr_area = {area.x + PAD, area.y + 24, area.width - 2 * PAD, area.height * 0.5f};
+    Box b = measure(ed.root, EXPR_SIZE);
+    float base = expr_area.y + b.asc + 4;
+    caret_ed = shown < 0 ? &ed : NULL;
+    caret_found = 0;
+    BeginScissorMode((int)area.x + 4, (int)area.y, (int)area.width - 8, (int)area.height);
+    layout_row(ed.root, EXPR_SIZE, 1, expr_area.x - hscroll, base, COL_TEXT);
+    if (caret_found && ((int)(GetTime() * 2.5)) % 2 == 0)
+        DrawRectangleRec(caret, COL_CURSOR);
+    EndScissorMode();
+    caret_ed = NULL;
+
+    if (caret_found) {
+        float cx = caret.x + hscroll - expr_area.x;   /* cursor position within the expression */
+        if (cx - hscroll > expr_area.width - 10)
+            hscroll = cx - expr_area.width + 10;
+        if (cx - hscroll < 0)
+            hscroll = cx > 20 ? cx - 20 : 0;
+    }
+    if (b.w <= expr_area.width)
+        hscroll = 0;
+
+    /* The result, bottom right. */
+    float top = base + b.desc + 10;
+    Rectangle res = {area.x + PAD, top, area.width - 2 * PAD, area.y + area.height - PAD - top};
+    if (error_text[0]) {
+        draw_message(error_text, res, COL_ERROR);
+    } else {
+        int frac;
+        char *s = result_text(&frac);
+        if (s) {
+            if (frac)
+                draw_fraction_result(s, res);
+            else if (history[shown].message)
+                draw_message(s, res, COL_MUTED);
+            else
+                draw_text_result(s, res, COL_TEXT);
+            free(s);
+        }
+    }
+}
+
+/* ---- Buttons ------------------------------------------------------------------- */
+
+enum { A_TEXT, A_TEMPLATE, A_SQUARE, A_POW, A_EXP, A_EVAL, A_DEL, A_AC };
 enum { K_NUM, K_OP, K_FN, K_CTRL, K_ACCENT };
 
 typedef struct {
-    const char *label;
-    const char *insert;   /* text to insert for ACT_INSERT */
+    const char *label;   /* text label, unless icon >= 0 */
+    int icon;            /* index into icons[], or -1 */
     int action;
-    int kind;             /* K_* color group */
-    int span;             /* how many columns it covers */
+    const char *text;    /* A_TEXT: what to type */
+    ItemKind kind;       /* A_TEMPLATE */
+    int color;
 } Button;
 
-#define FN(l, t) {l, t, ACT_INSERT, K_FN, 1}
-#define OP(l, t) {l, t, ACT_INSERT, K_OP, 1}
-#define NUM(l) {l, l, ACT_INSERT, K_NUM, 1}
+enum { ICON_FRAC, ICON_SQRT, ICON_ROOT, ICON_SQUARE, ICON_POW, ICON_LOGB, ICON_ABS, ICON_EXP };
 
-#define COLS 6
-static const Button BUTTONS[] = {
-    FN("sin", "sin("), FN("cos", "cos("), FN("tan", "tan("),
-    FN("ln", "ln("), FN("log", "log("), FN("\xE2\x88\x9A", "sqrt("),               /* √ */
+#define TPL(icon, kind) {NULL, icon, A_TEMPLATE, NULL, kind, K_FN}
+#define TXT(label, text, color) {label, -1, A_TEXT, text, IT_CHAR, color}
 
-    FN("asin", "asin("), FN("acos", "acos("), FN("atan", "atan("),
-    FN("exp", "exp("), OP("x\xCA\xB8", "^"), OP("n!", "!"),                        /* xʸ */
+static const Button FN_BUTTONS[] = {
+    TPL(ICON_FRAC, IT_FRAC), TPL(ICON_SQRT, IT_SQRT), TPL(ICON_ROOT, IT_ROOT),
+    {NULL, ICON_SQUARE, A_SQUARE, NULL, IT_CHAR, K_FN}, {NULL, ICON_POW, A_POW, NULL, IT_CHAR, K_FN},
+    TPL(ICON_LOGB, IT_LOGB),
 
-    FN("\xCE\xA3", "\xCE\xA3(k=1, "), FN("\xCE\xA0", "\xCE\xA0(k=1, "),            /* Σ Π */
-    FN("\xCF\x80", "\xCF\x80"), FN("e", "e"), OP("(", "("), OP(")", ")"),          /* π */
+    {"\xCE\xA3", -1, A_TEMPLATE, NULL, IT_SUM, K_FN}, {"\xCE\xA0", -1, A_TEMPLATE, NULL, IT_PROD, K_FN},
+    TPL(ICON_ABS, IT_ABS), TXT("ln", "ln(", K_FN), TXT("log", "log(", K_FN),
+    {NULL, ICON_EXP, A_EXP, NULL, IT_CHAR, K_FN},
 
-    NUM("7"), NUM("8"), NUM("9"), OP("\xC3\xB7", "/"),                             /* ÷ */
-    {"\xE2\x8C\xAB", NULL, ACT_BACKSPACE, K_CTRL, 1},                            /* ⌫ */
-    {"AC", NULL, ACT_CLEAR, K_CTRL, 1},
+    TXT("sin", "sin(", K_FN), TXT("cos", "cos(", K_FN), TXT("tan", "tan(", K_FN),
+    TXT("sin\xE2\x81\xBB\xC2\xB9", "asin(", K_FN), TXT("cos\xE2\x81\xBB\xC2\xB9", "acos(", K_FN),
+    TXT("tan\xE2\x81\xBB\xC2\xB9", "atan(", K_FN),
 
-    NUM("4"), NUM("5"), NUM("6"), OP("\xC3\x97", "*"), FN("k", "k"), OP(",", ", "), /* × */
-
-    NUM("1"), NUM("2"), NUM("3"), OP("\xE2\x88\x92", "-"),                         /* − */
-    FN("ans", "ans"), OP("mod", "%"),
-
-    {"0", "0", ACT_INSERT, K_NUM, 2}, NUM("."), OP("+", "+"),
-    {"=", NULL, ACT_EVAL, K_ACCENT, 2},
+    TXT("\xCF\x80", "\xCF\x80", K_FN), TXT("e", "e", K_FN), TXT("k", "k", K_FN), TXT("n!", "!", K_FN),
+    TXT("(", "(", K_FN), TXT(")", ")", K_FN),
 };
+
+static const Button NUM_BUTTONS[] = {
+    TXT("7", "7", K_NUM), TXT("8", "8", K_NUM), TXT("9", "9", K_NUM),
+    {"DEL", -1, A_DEL, NULL, IT_CHAR, K_CTRL}, {"AC", -1, A_AC, NULL, IT_CHAR, K_CTRL},
+
+    TXT("4", "4", K_NUM), TXT("5", "5", K_NUM), TXT("6", "6", K_NUM),
+    TXT("\xC3\x97", "*", K_OP), TXT("\xC3\xB7", "/", K_OP),
+
+    TXT("1", "1", K_NUM), TXT("2", "2", K_NUM), TXT("3", "3", K_NUM),
+    TXT("+", "+", K_OP), TXT("\xE2\x88\x92", "-", K_OP),
+
+    TXT("0", "0", K_NUM), TXT(".", ".", K_NUM), TXT(",", ",", K_OP), TXT("Ans", "Ans", K_OP),
+    {"=", -1, A_EVAL, NULL, IT_CHAR, K_ACCENT},
+};
+
 static Color kind_color(int kind)
 {
     switch (kind) {
@@ -99,291 +744,275 @@ static Color kind_color(int kind)
     }
 }
 
-#define NBUTTONS (sizeof BUTTONS / sizeof *BUTTONS)
-#define ROWS 7
-
-/* ---- State ---------------------------------------------------------------- */
-
-typedef struct {
-    char *expr;
-    char *result;   /* text as shown, e.g. "= 42" or "error: ..." */
-    char *copy;     /* the bare result for copying */
-    int error;
-    float wrap_width;    /* width the line counts below were measured at */
-    int expr_lines, result_lines;
-    float top, height;   /* position inside the history */
-} Entry;
-
-static Font font;
-static Calc calc;
-static char input[MAX_INPUT];
-static size_t input_len, cursor;
-static Entry history[MAX_HISTORY];
-static int nhistory;
-static int recall = -1;        /* index into history while using Up/Down */
-static float scroll;           /* pixels scrolled up from the bottom of the history */
-
-/* ---- Text helpers ---------------------------------------------------------- */
-
-static void draw_text(const char *s, float x, float y, float size, Color c)
+static void make_icons(void)
 {
-    DrawTextEx(font, s, (Vector2){x, y}, size, 0, c);
-}
-
-static float text_width(const char *s, float size)
-{
-    return MeasureTextEx(font, s, size, 0).x;
-}
-
-static float glyph_advance(int cp, float size)
-{
-    GlyphInfo g = GetGlyphInfo(font, cp);
-    float adv = g.advanceX ? (float)g.advanceX : GetGlyphAtlasRec(font, cp).width;
-    return adv * size / (float)font.baseSize;
-}
-
-/*
- * Wraps s to `width`, drawing it at (x, y) when `draw` is set, and returns the
- * number of lines. Breaks after a space when there is one, otherwise anywhere
- * (long numbers have no spaces).
- */
-static int wrap(const char *s, float size, float width, float x, float y, Color c, int draw)
-{
-    int lines = 0;
-    const char *line = s;
-    while (*line) {
-        float w = 0, space_w = 0;
-        const char *p = line, *last_space = NULL, *end = NULL;
-        while (*p) {
-            int n;
-            int cp = GetCodepointNext(p, &n);
-            float a = glyph_advance(cp, size);
-            if (w + a > width && p > line) {
-                /* Break at the last space unless that leaves a stub like "= ". */
-                end = last_space && space_w > width / 3 ? last_space + 1 : p;
-                break;
-            }
-            if (cp == ' ') {
-                last_space = p;
-                space_w = w;
-            }
-            w += a;
-            p += n;
-        }
-        if (!end)
-            end = p;
-        if (draw) {
-            char buf[1024];
-            size_t len = (size_t)(end - line);
-            if (len >= sizeof buf)
-                len = sizeof buf - 1;
-            memcpy(buf, line, len);
-            buf[len] = '\0';
-            draw_text(buf, x, y + (float)lines * size * 1.15f, size, c);
-        }
-        lines++;
-        line = end;
+    Editor t;
+    ItemKind tpl[] = {IT_FRAC, IT_SQRT, IT_ROOT};
+    for (int i = 0; i < 3; i++) {
+        ed_init(&t);
+        ed_insert_template(&t, tpl[i], 0);
+        icons[i] = row_clone(t.root);
+        ed_free(&t);
     }
-    return lines ? lines : 1;
+    ed_init(&t);
+    ed_insert_text(&t, "x");
+    ed_insert_pow(&t, "2");
+    icons[ICON_SQUARE] = row_clone(t.root);
+    ed_clear(&t);
+    ed_insert_text(&t, "x");
+    ed_insert_pow(&t, NULL);
+    icons[ICON_POW] = row_clone(t.root);
+    ed_clear(&t);
+    ed_insert_template(&t, IT_LOGB, 0);
+    icons[ICON_LOGB] = row_clone(t.root);
+    ed_clear(&t);
+    ed_insert_template(&t, IT_ABS, 0);
+    icons[ICON_ABS] = row_clone(t.root);
+    ed_clear(&t);
+    ed_insert_text(&t, "e");
+    ed_insert_pow(&t, "x");
+    icons[ICON_EXP] = row_clone(t.root);
+    ed_free(&t);
 }
 
-static char *dup(const char *s)
+static int button_frame(Rectangle r, Color color)
 {
-    char *d = malloc(strlen(s) + 1);
-    if (!d) {
-        fputs("calc: out of memory\n", stderr);
-        exit(1);
+    int hover = CheckCollisionPointRec(GetMousePosition(), r);
+    if (hover) {
+        any_hover = 1;
+        color = ColorBrightness(color, IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? -0.15f : 0.12f);
     }
-    return strcpy(d, s);
+    DrawRectangleRounded(r, 0.22f, 8, color);
+    return hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
 }
 
-/* Copy of s for the screen; huge results (like 50000!) are cut short. */
-static char *for_display(const char *s)
+static int text_button(Rectangle r, const char *label, Color color, float size)
 {
-    size_t len = strlen(s);
-    if (len <= MAX_SHOWN_BYTES)
-        return dup(s);
-    char *cut = malloc(MAX_SHOWN_BYTES + 80);
-    if (!cut)
-        exit(1);
-    snprintf(cut, MAX_SHOWN_BYTES + 80, "%.*s\xE2\x80\xA6 (%zu more; Copy gets all)",
-             MAX_SHOWN_BYTES, s, len - MAX_SHOWN_BYTES);
-    return cut;
+    int clicked = button_frame(r, color);
+    while (size > 10 && tw(label, size) > r.width - 8)
+        size -= 1;
+    Vector2 t = MeasureTextEx(font, label, size, 0);
+    DrawTextEx(font, label, (Vector2){r.x + (r.width - t.x) / 2, r.y + (r.height - t.y) / 2}, size, 0,
+               COL_TEXT);
+    return clicked;
 }
 
-/* ---- Input editing ---------------------------------------------------------- */
-
-static void input_insert(const char *s)
+static int icon_button(Rectangle r, const Row *icon, Color color)
 {
-    size_t n = strlen(s);
-    if (input_len + n >= MAX_INPUT)
-        return;
-    memmove(input + cursor + n, input + cursor, input_len - cursor + 1);
-    memcpy(input + cursor, s, n);
-    input_len += n;
-    cursor += n;
-    recall = -1;
-}
-
-static void input_set(const char *s)
-{
-    snprintf(input, sizeof input, "%s", s);
-    input_len = cursor = strlen(input);
-}
-
-/* Moves over one whole UTF-8 character. */
-static size_t prev_char(size_t pos)
-{
-    if (pos == 0)
-        return 0;
-    do
-        pos--;
-    while (pos > 0 && (input[pos] & 0xC0) == 0x80);
-    return pos;
-}
-
-static size_t next_char(size_t pos)
-{
-    if (pos >= input_len)
-        return input_len;
-    do
-        pos++;
-    while (pos < input_len && (input[pos] & 0xC0) == 0x80);
-    return pos;
-}
-
-static void input_backspace(void)
-{
-    size_t start = prev_char(cursor);
-    memmove(input + start, input + cursor, input_len - cursor + 1);
-    input_len -= cursor - start;
-    cursor = start;
-}
-
-static void input_delete(void)
-{
-    size_t end = next_char(cursor);
-    memmove(input + cursor, input + end, input_len - end + 1);
-    input_len -= end - cursor;
-}
-
-/* ---- History ------------------------------------------------------------------ */
-
-static void add_entry(const char *expr, const char *shown, const char *copy, int error)
-{
-    if (nhistory == MAX_HISTORY) {
-        free(history[0].expr);
-        free(history[0].result);
-        free(history[0].copy);
-        memmove(history, history + 1, (MAX_HISTORY - 1) * sizeof *history);
-        nhistory--;
+    int clicked = button_frame(r, color);
+    float s = r.height * 0.36f;
+    Box b = measure(icon, s);
+    while (s > 8 && (b.asc + b.desc > r.height - 6 || b.w > r.width - 8)) {
+        s -= 1;
+        b = measure(icon, s);
     }
-    Entry *e = &history[nhistory++];
-    e->expr = dup(expr);
-    e->result = for_display(shown);
-    e->copy = dup(copy);
-    e->error = error;
-    e->wrap_width = 0;
-}
-
-static void evaluate(void)
-{
-    if (input_len == 0)
-        return;
-
-    /* Starting with an operator continues from the last answer: "+ 1" means "ans + 1". */
-    char expr[MAX_INPUT + 8];
-    int continues = nhistory > 0 && strchr("+*/^%", input[0]) != NULL;
-    snprintf(expr, sizeof expr, "%s%s", continues ? "ans " : "", input);
-
-    char err[256];
-    char *out = calc_eval(&calc, expr, err, sizeof err);
-    if (!out) {
-        char msg[300];
-        snprintf(msg, sizeof msg, "error: %s", err);
-        add_entry(expr, msg, msg, 1);
-        return;   /* keep the input so it can be fixed */
-    }
-
-    if (expr[0] == ':' || strncmp(out, "\xE2\x89\x88", 3) == 0) {   /* commands and "≈ ..." */
-        add_entry(expr, out, out, 0);
-    } else {
-        char *shown = malloc(strlen(out) + 3);
-        sprintf(shown, "= %s", out);
-        add_entry(expr, shown, out, 0);
-        free(shown);
-    }
-    free(out);
-    input_set("");
-    scroll = 0;
-}
-
-/* Re-runs a command like ":sci" and redraws the last result in the new format. */
-static void command(const char *cmd, int reformat)
-{
-    char err[256];
-    char *out = calc_eval(&calc, cmd, err, sizeof err);
-    free(out);
-    if (!reformat || nhistory == 0)
-        return;
-    Entry *e = &history[nhistory - 1];
-    if (e->error || e->expr[0] == ':')
-        return;
-    char *s = rat_to_str(&calc.ans.r, calc.digits, calc.sci, calc.ans.exact);
-    char *shown = malloc(strlen(s) + 3);
-    sprintf(shown, "%s%s", calc.ans.exact ? "= " : "", s);
-    free(e->result);
-    free(e->copy);
-    e->result = for_display(shown);
-    e->copy = s;
-    e->wrap_width = 0;
-    free(shown);
+    float base = r.y + (r.height - (b.asc + b.desc)) / 2 + b.asc;
+    layout_row(icon, s, 1, r.x + (r.width - b.w) / 2, base, COL_TEXT);
+    return clicked;
 }
 
 static void press(const Button *b)
 {
     switch (b->action) {
-    case ACT_INSERT:
-        input_insert(b->insert);
+    case A_TEXT:
+        type_text(b->text);
         break;
-    case ACT_EVAL:
+    case A_TEMPLATE:
+        begin_edit(0);
+        ed_insert_template(&ed, b->kind, 0);
+        break;
+    case A_SQUARE:
+        begin_edit(1);
+        ed_insert_pow(&ed, "2");
+        break;
+    case A_POW:
+        begin_edit(1);
+        ed_insert_pow(&ed, NULL);
+        break;
+    case A_EXP:
+        begin_edit(0);
+        ed_insert_text(&ed, "e");
+        ed_insert_pow(&ed, NULL);
+        break;
+    case A_EVAL:
         evaluate();
         break;
-    case ACT_CLEAR:
-        input_set("");
+    case A_DEL:
+        resume_edit();
+        ed_backspace(&ed);
         break;
-    case ACT_BACKSPACE:
-        input_backspace();
+    case A_AC:
+        ed_clear(&ed);
+        resume_edit();
         break;
     }
 }
 
-/* ---- Widgets ------------------------------------------------------------------ */
-
-static int any_hover;   /* set when the mouse is over anything clickable */
-
-static int button(Rectangle r, const char *label, Color color, float text_size)
+static void draw_grid(const Button *buttons, int count, int cols, Rectangle area)
 {
-    Vector2 m = GetMousePosition();
-    int hover = CheckCollisionPointRec(m, r);
-    if (hover)
-        any_hover = 1;
-    int clicked = hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
-    if (hover && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-        color = ColorBrightness(color, -0.15f);
-    else if (hover)
-        color = ColorBrightness(color, 0.12f);
-    DrawRectangleRounded(r, 0.22f, 8, color);
-
-    float size = text_size;
-    while (size > 10 && text_width(label, size) > r.width - 8)
-        size -= 1;
-    Vector2 t = MeasureTextEx(font, label, size, 0);
-    draw_text(label, r.x + (r.width - t.x) / 2, r.y + (r.height - t.y) / 2, size, COL_TEXT);
-    return clicked;
+    int rows = (count + cols - 1) / cols;
+    float bw = (area.width - (float)(cols - 1) * GAP) / (float)cols;
+    float bh = (area.height - (float)(rows - 1) * GAP) / (float)rows;
+    float size = bh * 0.4f < 24 ? bh * 0.4f : 24;
+    for (int i = 0; i < count; i++) {
+        const Button *b = &buttons[i];
+        Rectangle r = {area.x + (float)(i % cols) * (bw + GAP), area.y + (float)(i / cols) * (bh + GAP), bw,
+                       bh};
+        Color color = kind_color(b->color);
+        int clicked = b->icon >= 0 ? icon_button(r, icons[b->icon], color)
+                                   : text_button(r, b->label, color, size);
+        if (clicked)
+            press(b);
+    }
 }
 
-/* ---- Main ----------------------------------------------------------------------- */
+static void command(const char *cmd)
+{
+    char err[256];
+    free(calc_eval(&calc, cmd, err, sizeof err));
+}
+
+static void draw_modebar(Rectangle area)
+{
+    float unit = (area.width - 4 * GAP) / 5.6f;
+    Rectangle r = {area.x, area.y, unit, area.height};
+    char label[32];
+
+    if (text_button(r, calc.degrees ? "DEG" : "RAD", COL_TOGGLE, 15))
+        command(calc.degrees ? ":rad" : ":deg");
+    r.x += unit + GAP;
+    if (text_button(r, calc.sci ? "SCI" : "FIX", COL_TOGGLE, 15))
+        command(calc.sci ? ":fix" : ":sci");
+    r.x += unit + GAP;
+    if (text_button(r, "S\xE2\x87\x94" "D", COL_TOGGLE, 15))
+        show_fraction = !show_fraction;
+    r.x += unit + GAP;
+
+    float dw = unit * 1.6f;
+    Rectangle minus = {r.x, r.y, r.height, r.height};
+    Rectangle plus = {r.x + dw - r.height, r.y, r.height, r.height};
+    if (text_button(minus, "\xE2\x88\x92", COL_FN, 18) && calc.digits > 1) {
+        snprintf(label, sizeof label, ":digits %d", calc.digits > 5 ? calc.digits - 5 : 1);
+        command(label);
+    }
+    if (text_button(plus, "+", COL_FN, 18)) {
+        snprintf(label, sizeof label, ":digits %d", calc.digits + 5);
+        command(label);
+    }
+    snprintf(label, sizeof label, "%d", calc.digits);
+    Vector2 t = MeasureTextEx(font, label, 15, 0);
+    DrawTextEx(font, label, (Vector2){r.x + (dw - t.x) / 2, r.y + (r.height - t.y) / 2}, 15, 0, COL_MUTED);
+    r.x += dw + GAP;
+
+    if (text_button(r, "Copy", COL_FN, 15))
+        copy_result();
+}
+
+/* ---- Keyboard ------------------------------------------------------------------- */
+
+static void handle_key(int key)
+{
+    switch (key) {
+    case KEY_ENTER:
+    case KEY_KP_ENTER:
+        evaluate();
+        break;
+    case KEY_BACKSPACE:
+    case KEY_DELETE:
+        resume_edit();
+        ed_backspace(&ed);
+        break;
+    case KEY_LEFT:
+        if (shown >= 0)
+            ed_end(&ed);
+        else
+            ed_left(&ed);
+        resume_edit();
+        break;
+    case KEY_RIGHT:
+        if (shown >= 0)
+            ed_home(&ed);
+        else
+            ed_right(&ed);
+        resume_edit();
+        break;
+    case KEY_HOME:
+        ed_home(&ed);
+        resume_edit();
+        break;
+    case KEY_END:
+        ed_end(&ed);
+        resume_edit();
+        break;
+    case KEY_UP:
+    case KEY_DOWN: {
+        int dir = key == KEY_UP ? -1 : 1;
+        /* Inside a fraction or sum, move between its boxes; otherwise replay. */
+        if (shown >= 0 || !ed_vertical(&ed, dir)) {
+            if (shown >= 0 || ed_is_empty(&ed))
+                replay(dir);
+        }
+        break;
+    }
+    case KEY_ESCAPE:
+        ed_clear(&ed);
+        resume_edit();
+        break;
+    }
+}
+
+static void handle_keys(void)
+{
+    int mod = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
+              IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+
+    int cp;
+    while ((cp = GetCharPressed()) > 0) {
+        if (mod || cp == ' ')
+            continue;
+        if (cp == '/') {   /* "12/" makes a fraction with 12 on top */
+            begin_edit(1);
+            ed_insert_template(&ed, IT_FRAC, 1);
+        } else if (cp == '^') {
+            begin_edit(1);
+            ed_insert_pow(&ed, NULL);
+        } else {
+            int n;
+            char utf8[8];
+            const char *bytes = CodepointToUTF8(cp, &n);
+            memcpy(utf8, bytes, (size_t)n);
+            utf8[n] = '\0';
+            type_text(utf8);
+        }
+    }
+
+    if (mod && IsKeyPressed(KEY_C))
+        copy_result();
+    if (mod && IsKeyPressed(KEY_V)) {
+        const char *clip = GetClipboardText();
+        if (clip && *clip) {
+            char buf[2048];
+            size_t j = 0;
+            for (size_t i = 0; clip[i] && j + 1 < sizeof buf; i++)
+                if (clip[i] != '\n' && clip[i] != '\r' && clip[i] != '\t')
+                    buf[j++] = clip[i];
+            buf[j] = '\0';
+            type_text(buf);
+        }
+    }
+
+    /* GetKeyPressed() is a queue, so a key pressed and released within one
+     * frame still counts; held keys repeat through IsKeyPressedRepeat(). */
+    int key;
+    while ((key = GetKeyPressed()) != 0)
+        handle_key(key);
+    const int repeating[] = {KEY_BACKSPACE, KEY_DELETE, KEY_LEFT, KEY_RIGHT};
+    for (size_t i = 0; i < sizeof repeating / sizeof *repeating; i++)
+        if (IsKeyPressedRepeat(repeating[i]))
+            handle_key(repeating[i]);
+}
+
+/* ---- Main ------------------------------------------------------------------------ */
 
 static Font load_font(void)
 {
@@ -392,7 +1021,8 @@ static Font load_font(void)
         " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
         "abcdefghijklmnopqrstuvwxyz{|}~"
         "\xE2\x89\x88\xCF\x80\xCE\xA3\xCE\xA0\xE2\x88\x91\xE2\x88\x8F\xE2\x88\x9A"
-        "\xC3\xB7\xC3\x97\xE2\x88\x92\xE2\x8C\xAB\xCA\xB8\xE2\x80\xA6";
+        "\xC3\xB7\xC3\x97\xE2\x88\x92\xE2\x8C\xAB\xCA\xB8\xE2\x80\xA6\xE2\x81\xBB\xC2\xB9"
+        "\xE2\x87\x94";
     int count;
     int *cps = LoadCodepoints(chars, &count);
 
@@ -414,258 +1044,46 @@ static Font load_font(void)
     return f;
 }
 
-static void handle_key(int key)
-{
-    switch (key) {
-    case KEY_ENTER:
-    case KEY_KP_ENTER:
-        evaluate();
-        break;
-    case KEY_BACKSPACE:
-        input_backspace();
-        break;
-    case KEY_DELETE:
-        input_delete();
-        break;
-    case KEY_LEFT:
-        cursor = prev_char(cursor);
-        break;
-    case KEY_RIGHT:
-        cursor = next_char(cursor);
-        break;
-    case KEY_HOME:
-        cursor = 0;
-        break;
-    case KEY_END:
-        cursor = input_len;
-        break;
-    case KEY_ESCAPE:
-        input_set("");
-        recall = -1;
-        break;
-    case KEY_UP:
-        if (nhistory > 0) {
-            recall = recall < 0 ? nhistory - 1 : (recall > 0 ? recall - 1 : 0);
-            input_set(history[recall].expr);
-        }
-        break;
-    case KEY_DOWN:
-        if (recall >= 0) {
-            recall++;
-            if (recall >= nhistory) {
-                recall = -1;
-                input_set("");
-            } else {
-                input_set(history[recall].expr);
-            }
-        }
-        break;
-    }
-}
-
-static void handle_keys(void)
-{
-    int mod = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
-              IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
-
-    int cp;
-    while ((cp = GetCharPressed()) > 0) {
-        if (mod)
-            continue;
-        int n;
-        char utf8[8];
-        const char *bytes = CodepointToUTF8(cp, &n);
-        memcpy(utf8, bytes, (size_t)n);
-        utf8[n] = '\0';
-        input_insert(utf8);
-    }
-
-    if (mod && IsKeyPressed(KEY_C) && nhistory > 0)
-        SetClipboardText(history[nhistory - 1].copy);
-    if (mod && IsKeyPressed(KEY_V)) {
-        const char *clip = GetClipboardText();
-        if (clip) {
-            char buf[MAX_INPUT];
-            size_t j = 0;
-            for (size_t i = 0; clip[i] && j + 1 < sizeof buf; i++)
-                buf[j++] = clip[i] == '\n' || clip[i] == '\r' || clip[i] == '\t' ? ' ' : clip[i];
-            buf[j] = '\0';
-            input_insert(buf);
-        }
-    }
-
-    /* GetKeyPressed() is a queue, so a key pressed and released within one
-     * frame still counts; held keys repeat through IsKeyPressedRepeat(). */
-    int key;
-    while ((key = GetKeyPressed()) != 0)
-        handle_key(key);
-    const int repeating[] = {KEY_BACKSPACE, KEY_DELETE, KEY_LEFT, KEY_RIGHT};
-    for (size_t i = 0; i < sizeof repeating / sizeof *repeating; i++)
-        if (IsKeyPressedRepeat(repeating[i]))
-            handle_key(repeating[i]);
-}
-
-static void draw_history(Rectangle area)
-{
-    float width = area.width - 2 * PAD;
-
-    /* Lay out entries from the top, then anchor the bottom to the area. */
-    float total = 0;
-    for (int i = 0; i < nhistory; i++) {
-        Entry *e = &history[i];
-        if (e->wrap_width != width) {   /* measuring long results is slow; redo only on resize */
-            e->expr_lines = wrap(e->expr, EXPR_SIZE, width, 0, 0, BLANK, 0);
-            e->result_lines = wrap(e->result, RESULT_SIZE, width, 0, 0, BLANK, 0);
-            e->wrap_width = width;
-        }
-        e->top = total;
-        e->height = (float)e->expr_lines * EXPR_SIZE * 1.15f +
-                    (float)e->result_lines * RESULT_SIZE * 1.15f + 4;
-        total += e->height + 14;
-    }
-
-    float max_scroll = total > area.height ? total - area.height + PAD : 0;
-    if (CheckCollisionPointRec(GetMousePosition(), area))
-        scroll += GetMouseWheelMove() * 40;
-    if (scroll < 0)
-        scroll = 0;
-    if (scroll > max_scroll)
-        scroll = max_scroll;
-    float origin = area.y + area.height - total + scroll;   /* y of the first entry */
-    if (total < area.height)
-        origin = area.y + area.height - total;
-
-    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
-    if (nhistory == 0)
-        draw_text("Type an expression or use the buttons.", area.x + PAD, area.y + PAD, EXPR_SIZE,
-                  COL_MUTED);
-    for (int i = 0; i < nhistory; i++) {
-        Entry *e = &history[i];
-        float y = origin + e->top;
-        if (y + e->height < area.y || y > area.y + area.height)
-            continue;
-        Rectangle hit = {area.x, y - 4, area.width, e->height + 8};
-        if (CheckCollisionPointRec(GetMousePosition(), hit)) {
-            DrawRectangleRec(hit, ColorBrightness(COL_PANEL, 0.06f));
-            any_hover = 1;
-            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
-                input_set(e->expr);   /* click to edit an earlier line */
-        }
-        int le = wrap(e->expr, EXPR_SIZE, width, area.x + PAD, y, COL_MUTED, 1);
-        y += (float)le * EXPR_SIZE * 1.15f + 4;
-        wrap(e->result, RESULT_SIZE, width, area.x + PAD, y, e->error ? COL_ERROR : COL_TEXT, 1);
-    }
-    EndScissorMode();
-}
-
-static void draw_input(Rectangle area)
-{
-    DrawRectangleRec(area, ColorBrightness(COL_PANEL, -0.12f));
-
-    /* Scroll sideways so the cursor stays visible. */
-    char before[MAX_INPUT];
-    memcpy(before, input, cursor);
-    before[cursor] = '\0';
-    float cx = text_width(before, INPUT_SIZE);
-    float room = area.width - 2 * PAD;
-    float shift = cx > room ? cx - room : 0;
-    float ty = area.y + (area.height - INPUT_SIZE) / 2;
-
-    BeginScissorMode((int)area.x + (int)PAD / 2, (int)area.y, (int)(area.width - PAD), (int)area.height);
-    draw_text(input, area.x + PAD - shift, ty, INPUT_SIZE, COL_TEXT);
-    if (((int)(GetTime() * 2)) % 2 == 0)
-        DrawRectangleRec((Rectangle){area.x + PAD - shift + cx, ty, 2, INPUT_SIZE}, COL_CURSOR);
-    EndScissorMode();
-}
-
-static void draw_modebar(Rectangle area)
-{
-    float w = (area.width - 3 * GAP) / 4.6f;   /* the digits control is 1.6x wide */
-    Rectangle r = {area.x, area.y, w, area.height};
-    char label[32];
-
-    if (button(r, calc.degrees ? "DEG" : "RAD", COL_TOGGLE, 16))
-        command(calc.degrees ? ":rad" : ":deg", 0);
-    r.x += w + GAP;
-    if (button(r, calc.sci ? "SCI" : "FIX", COL_TOGGLE, 16))
-        command(calc.sci ? ":fix" : ":sci", 1);
-    r.x += w + GAP;
-
-    /* digits: [-] 20 [+] */
-    float dw = w * 1.6f;
-    Rectangle minus = {r.x, r.y, r.height, r.height};
-    Rectangle plus = {r.x + dw - r.height, r.y, r.height, r.height};
-    if (button(minus, "\xE2\x88\x92", COL_FN, 18) && calc.digits > 1) {
-        snprintf(label, sizeof label, ":digits %d", calc.digits > 5 ? calc.digits - 5 : 1);
-        command(label, 0);
-    }
-    if (button(plus, "+", COL_FN, 18)) {
-        snprintf(label, sizeof label, ":digits %d", calc.digits + 5);
-        command(label, 0);
-    }
-    snprintf(label, sizeof label, "%d digits", calc.digits);
-    Vector2 t = MeasureTextEx(font, label, 15, 0);
-    draw_text(label, r.x + (dw - t.x) / 2, r.y + (r.height - t.y) / 2, 15, COL_MUTED);
-    r.x += dw + GAP;
-
-    if (button(r, "Copy", COL_FN, 16) && nhistory > 0)
-        SetClipboardText(history[nhistory - 1].copy);
-}
-
 int main(void)
 {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
-    InitWindow(480, 780, "Calc");
-    SetWindowMinSize(360, 620);
-    SetExitKey(KEY_NULL);   /* Esc clears the input instead of quitting */
+    InitWindow(480, 800, "Calc");
+    SetWindowMinSize(380, 660);
+    SetExitKey(KEY_NULL);   /* Esc clears instead of quitting */
     SetTargetFPS(60);
     font = load_font();
     calc_init(&calc);
+    ed_init(&ed);
+    make_icons();
 
     while (!WindowShouldClose()) {
         handle_keys();
 
         float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
-        float grid_h = H * 0.52f;
-        Rectangle display = {PAD, PAD, W - 2 * PAD, H - grid_h - MODEBAR_H - 4 * PAD};
-        Rectangle input_area = {display.x, display.y + display.height - 56, display.width, 56};
-        Rectangle hist = {display.x, display.y, display.width, display.height - 56};
-        Rectangle modebar = {PAD, display.y + display.height + PAD, W - 2 * PAD, MODEBAR_H};
+        float keys_h = H * 0.6f;
+        Rectangle screen = {PAD, PAD, W - 2 * PAD, H - keys_h - MODEBAR_H - 3 * PAD};
+        Rectangle modebar = {PAD, screen.y + screen.height + PAD, W - 2 * PAD, MODEBAR_H};
         float gy = modebar.y + MODEBAR_H + PAD;
-        float bw = (W - 2 * PAD - (COLS - 1) * GAP) / COLS;
-        float bh = (H - gy - PAD - (ROWS - 1) * GAP) / ROWS;
+        float fn_h = (H - gy - PAD) * 0.47f;
+        Rectangle fn_area = {PAD, gy, W - 2 * PAD, fn_h};
+        Rectangle num_area = {PAD, gy + fn_h + PAD, W - 2 * PAD, H - gy - fn_h - 2 * PAD};
 
         any_hover = 0;
         BeginDrawing();
         ClearBackground(COL_BG);
-        DrawRectangleRounded(display, 0.04f, 8, COL_PANEL);
-        draw_history(hist);
-        draw_input(input_area);
+        draw_screen(screen);
         draw_modebar(modebar);
-
-        int col = 0, row = 0;
-        for (size_t i = 0; i < NBUTTONS; i++) {
-            const Button *b = &BUTTONS[i];
-            Rectangle r = {PAD + (float)col * (bw + GAP), gy + (float)row * (bh + GAP),
-                           bw * (float)b->span + GAP * (float)(b->span - 1), bh};
-            float size = bh * 0.38f < 26 ? bh * 0.38f : 26;
-            if (button(r, b->label, kind_color(b->kind), size))
-                press(b);
-            col += b->span;
-            if (col >= COLS) {
-                col = 0;
-                row++;
-            }
-        }
+        draw_grid(FN_BUTTONS, sizeof FN_BUTTONS / sizeof *FN_BUTTONS, 6, fn_area);
+        draw_grid(NUM_BUTTONS, sizeof NUM_BUTTONS / sizeof *NUM_BUTTONS, 5, num_area);
         SetMouseCursor(any_hover ? MOUSE_CURSOR_POINTING_HAND : MOUSE_CURSOR_DEFAULT);
         EndDrawing();
     }
 
-    for (int i = 0; i < nhistory; i++) {
-        free(history[i].expr);
-        free(history[i].result);
-        free(history[i].copy);
-    }
+    for (int i = 0; i < nhistory; i++)
+        entry_free(&history[i]);
+    for (size_t i = 0; i < sizeof icons / sizeof *icons; i++)
+        row_free(icons[i]);
+    ed_free(&ed);
     calc_free(&calc);
     if (font.texture.id != GetFontDefault().texture.id)
         UnloadFont(font);

@@ -22,7 +22,8 @@ static const char HELP[] =
     "Logs:       ln(x)  log(x) (base 10)  log2(x)  log(x, base)  exp(x)\n"
     "Trig:       sin cos tan asin acos atan sinh cosh tanh\n"
     "Other:      abs floor ceil round gcd lcm choose(n,k) perm(n,k)\n"
-    "Variables:  ans  (the previous result)\n"
+    "Variables:  ans or Ans  (the previous result)\n"
+    "Implicit:   2pi  3(4+1)  2sin(30)  mean 2*pi, 3*(4+1), 2*sin(30)\n"
     "Commands:   :deg  :rad  :sci  :fix  :digits N  :help  :quit\n"
     "\xE2\x89\x88 marks an approximate result; everything else is exact.";
 
@@ -101,7 +102,8 @@ char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
     if (!tree)
         return NULL;
 
-    Binding ans = {"ans", &c->ans, NULL};
+    Binding ans_lower = {"ans", &c->ans, NULL};
+    Binding ans = {"Ans", &c->ans, &ans_lower};
     EvalOptions opt = {c->digits + GUARD_DIGITS, c->degrees};
     Value v;
     val_init(&v);
