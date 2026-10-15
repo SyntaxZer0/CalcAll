@@ -2,7 +2,7 @@ CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -O2
 LDLIBS = -lm
 
-ENGINE = src/bigint.c src/rational.c src/approx.c src/cmath.c src/parser.c src/eval.c src/calc.c
+ENGINE = src/bigint.c src/rational.c src/approx.c src/cmath.c src/parser.c src/eval.c src/symbols.c src/calc.c
 HDR = $(wildcard src/*.h)
 
 calc: $(ENGINE) src/main.c $(HDR)

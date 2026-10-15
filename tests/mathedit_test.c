@@ -53,7 +53,7 @@ int main(void)
     ed_insert_text(&e, "12");
     ed_insert_template(&e, IT_FRAC, 1);
     ed_insert_text(&e, "3");
-    check("grab numerator", &e, "((12)/(3))", "4");
+    check("grab numerator", &e, "(12/3)", "4");
 
     /* Fraction button: fill the top, Down to the bottom, Right to leave. */
     ed_clear(&e);
@@ -63,7 +63,7 @@ int main(void)
     ed_insert_text(&e, "3");
     ed_right(&e);
     ed_insert_text(&e, "+1");
-    check("fraction navigation", &e, "((1)/(3))+1", "1.33333333333333333333...  (= 4/3)");
+    check("fraction navigation", &e, "(1/3)+1", "1.33333333333333333333...  (= 4/3)");
 
     /* Sum: k is filled in, the cursor starts in the "from" box. */
     ed_clear(&e);
@@ -74,7 +74,7 @@ int main(void)
     ed_right(&e);          /* into the body */
     ed_insert_text(&e, "k");
     ed_insert_pow(&e, "2");
-    check("sum", &e, "sum(k=1, 10, k^(2))", "385");
+    check("sum", &e, "sum(k=1, 10, k^2)", "385");
 
     /* An empty box is reported. */
     ed_clear(&e);
@@ -119,7 +119,7 @@ int main(void)
     ed_insert_text(&e, "+2");
     ed_insert_template(&e, IT_ABS, 0);
     ed_insert_text(&e, "-5");
-    check("mixed templates", &e, "2^(10)+root(27, 3)+log(8, 2)+2abs(-5)", "1040");
+    check("mixed templates", &e, "2^10+root(27, 3)+log(8, 2)+2abs(-5)", "1040");
 
     /* Left/Right walk through every box and back out. */
     ed_clear(&e);
@@ -132,35 +132,35 @@ int main(void)
     ed_left(&e);
     ed_left(&e);   /* now at the end of the numerator */
     ed_insert_text(&e, "0");
-    check("left/right", &e, "((10)/(2))", "5");
+    check("left/right", &e, "(10/2)", "5");
 
     /* Copies are independent and serialize the same. */
     Row *copy = row_clone(e.root);
     ed_clear(&e);
     ed_load(&e, copy);
     row_free(copy);
-    check("clone and load", &e, "((10)/(2))", "5");
+    check("clone and load", &e, "(10/2)", "5");
 
     /* Text mode: typing the CLI syntax builds templates. */
     struct {
         const char *typed, *text, *value;
     } typed[] = {
-        {"sum(k=1, 10, k^2)", "sum(k=1, 10, k^(2))", "385"},
+        {"sum(k=1, 10, k^2)", "sum(k=1, 10, k^2)", "385"},
         {"sum(k,1,10,k)", "sum(k=1, 10, k)", "55"},   /* the CLI's other form */
-        {"1/2+3", "((1)/(2))+3", "3.5"},
-        {"1/2^3*4", "((1)/(2^(3)))*4", "0.5"},
-        {"2^10-1", "2^(10)-1", "1023"},
+        {"1/2+3", "(1/2)+3", "3.5"},
+        {"1/2^3*4", "(1/(2^3))*4", "0.5"},
+        {"2^10-1", "2^10-1", "1023"},
         {"2^-1", "2^(-1)", "0.5"},
-        {"1/2/4", "((((1)/(2)))/(4))", "0.125"},
+        {"1/2/4", "(((1/2))/4)", "0.125"},
         {"prod(n=1,5,n)+1", "prod(n=1, 5, n)+1", "121"},
         {"sqrt(16)+cbrt(27)", "sqrt(16)+root(27, 3)", "7"},
         {"root(32,5)", "root(32, 5)", "2"},
         {"abs(-3)*2", "abs(-3)*2", "6"},
-        {"1/(2+3)+1", "((1)/(2+3))+1", "1.2"},
-        {"(1+2)/3", "(((1+2))/(3))", "1"},
+        {"1/(2+3)+1", "(1/(2+3))+1", "1.2"},
+        {"(1+2)/3", "(((1+2))/3)", "1"},
         {"2^(3+1)", "2^(3+1)", "16"},
         {"sum(k=1,3,gcd(k,6))", "sum(k=1, 3, gcd(k,6))", "6"},
-        {"exp(0)+pi*0", "e^(0)+\xCF\x80*0", "1"},
+        {"exp(0)+pi*0", "e^0+\xCF\x80*0", "1"},
         {"sumx", "sum(x=, , )", NULL},   /* x goes in the variable box */
     };
     for (size_t i = 0; i < sizeof typed / sizeof *typed; i++) {
@@ -192,7 +192,7 @@ int main(void)
     ed_home(&e);
     ed_tab(&e, 1);   /* from the start, Tab enters the fraction */
     ed_insert_text(&e, "0");
-    check("tab", &e, "((30)/(4))+1", "8.5");
+    check("tab", &e, "(30/4)+1", "8.5");
 
     ed_free(&e);
     calc_free(&calc);

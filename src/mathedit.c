@@ -630,6 +630,27 @@ static void ser_slot(const Item *it, int i, Buf *b, int *empty)
     ser_row(it->slot[i], b, empty);
 }
 
+/* A box holding just a number or a name, like 2 or x1, needs no parentheses. */
+static int simple(const Row *r)
+{
+    for (int i = 0; i < r->len; i++) {
+        const Item *it = r->items[i];
+        unsigned char c = (unsigned char)it->ch[0];
+        if (it->kind != IT_CHAR || !(isalnum(c) || c == '.' || c >= 0x80))
+            return 0;
+    }
+    return r->len > 0;
+}
+
+/* A box's contents, in parentheses unless they're simple. */
+static void ser_group(const Item *it, int i, Buf *b, int *empty)
+{
+    int bare = simple(it->slot[i]);
+    put(b, bare ? "" : "(");
+    ser_slot(it, i, b, empty);
+    put(b, bare ? "" : ")");
+}
+
 static void ser_item(const Item *it, Buf *b, int *empty)
 {
     switch (it->kind) {
@@ -637,16 +658,15 @@ static void ser_item(const Item *it, Buf *b, int *empty)
         put(b, it->ch);
         break;
     case IT_FRAC:
-        put(b, "((");
-        ser_slot(it, 0, b, empty);
-        put(b, ")/(");
-        ser_slot(it, 1, b, empty);
-        put(b, "))");
+        put(b, "(");
+        ser_group(it, 0, b, empty);
+        put(b, "/");
+        ser_group(it, 1, b, empty);
+        put(b, ")");
         break;
     case IT_POW:
-        put(b, "^(");
-        ser_slot(it, 0, b, empty);
-        put(b, ")");
+        put(b, "^");
+        ser_group(it, 0, b, empty);
         break;
     case IT_SQRT:
         put(b, "sqrt(");

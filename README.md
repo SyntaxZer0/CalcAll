@@ -91,12 +91,20 @@ Run it from the repository folder, or keep the `assets` folder next to
 | Sum | `sum(k=1, 100, k^2)` or `Σ(k=1, 100, k^2)` |
 | Product | `prod(k=1, 10, k)` or `Π(k=1, 10, k)` |
 | Other | `abs floor ceil round gcd lcm choose(n,k) perm(n,k)` |
-| Variables | `ans` (or `Ans`) holds the previous result |
+| Variables | `x = 5`, `rate = 0.05`, `θ = pi/3`; `ans` (or `Ans`) is the previous result |
+| Functions | `f(x) = x^2 + 1`, `g(a, b) = sqrt(a^2 + b^2)`, then `f(3)`, `g(3, 4)` |
 | Implicit × | `2pi`, `3(4+1)`, `2sin(30)` multiply |
-| Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:help`, `:quit` |
+| Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:vars`, `:clear [name]`, `:help`, `:quit` |
 
 Approximate results are computed with 10 more digits than are shown, so
 every digit you see is correct. `:digits 1000` gives π to 1000 places.
+
+A variable stores the value its right side has when you define it
+(`y = x^2` keeps 25 even if `x` changes later). A function's body is looked
+up each time it runs, so it uses the current values of your variables.
+Built-in names like `sin`, `pi` and `ans` can't be redefined. Letters next to
+each other multiply when there's no variable by that name, so with `x` and
+`y` defined, `xy` is `x*y`.
 
 Complex numbers work everywhere a real number does, and stay exact when
 they can: `(1+2i)(3-i)` = `5 + 5i`, `sqrt(-4)` = `2i`, `sqrt(3+4i)` = `2 + i`,
@@ -114,6 +122,7 @@ src/approx.c    sqrt, pi, exp, ln, sin, cos, atan via series in fixed point
 src/cmath.c     complex arithmetic and complex exp, ln, sqrt, sin, cos, ...
 src/parser.c    text -> expression tree (recursive descent)
 src/eval.c      walks the tree; tracks exact vs approximate; all functions
+src/symbols.c   the table of user variables and functions
 src/calc.c      the engine API a front end calls: calc_eval(line) -> text
 src/main.c      the terminal front end
 src/mathedit.c  the natural-display editor: templates, cursor, to-text

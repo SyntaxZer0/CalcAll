@@ -15,15 +15,17 @@ typedef struct {
     int sci;       /* nonzero: show results in scientific notation */
     int degrees;   /* nonzero: trig functions use degrees */
     Value ans;     /* the last result, available as `ans` */
+    Symbols syms;  /* the user's variables and functions */
+    int result_is_value;   /* the last calc_eval() gave a number (else a message) */
 } Calc;
 
 void calc_init(Calc *c);
 void calc_free(Calc *c);
 
 /*
- * Evaluates one line: an expression like "prod(k=1, 10, k)" or a command
- * like ":sci". Returns a malloc'd string to display (empty for a blank line),
- * or NULL with a message in err.
+ * Evaluates one line: an expression like "prod(k=1, 10, k)", a definition
+ * like "x = 5" or "f(x) = x^2", or a command like ":sci". Returns a malloc'd
+ * string to display (empty for a blank line), or NULL with a message in err.
  */
 char *calc_eval(Calc *c, const char *line, char *err, size_t errlen);
 

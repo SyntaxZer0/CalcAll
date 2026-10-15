@@ -15,6 +15,7 @@
 #define MAX_FACTORIAL 50000
 #define MAX_TERMS 1000000
 #define MAX_EXACT_ROOT 100   /* n-th roots are only tried exactly up to this n */
+#define MAX_CALL_DEPTH 100   /* user functions calling user functions */
 
 #define EXTRA 5              /* extra digits for intermediate approximate steps */
 #define LOG10_E 0.43429448190325182765
@@ -24,6 +25,9 @@ typedef struct {
     size_t len;
     int prec;
     int degrees;
+    const Symbols *syms;      /* user variables and functions */
+    const Binding *globals;   /* bindings visible everywhere, like ans */
+    int depth;                /* how deeply user functions are calling each other */
 } Ctx;
 
 void val_init(Value *v)
@@ -1402,11 +1406,30 @@ done:
     return rc;
 }
 
+/* Runs f(args): the body sees its parameters, the globals, and user variables. */
+static int call_user(const UserFunc *f, Value *args, size_t argc, Value *out, Ctx *c)
+{
+    if ((int)argc != f->nparams)
+        return fail(c, "%s takes %d argument%s", f->name, f->nparams, f->nparams == 1 ? "" : "s");
+    if (c->depth >= MAX_CALL_DEPTH)
+        return fail(c, "%s calls itself too many times", f->name);
+    Binding params[MAX_PARAMS];
+    for (size_t i = 0; i < argc; i++)
+        params[i] = (Binding){f->params[i], &args[i], i + 1 < argc ? &params[i + 1] : c->globals};
+    c->depth++;
+    int rc = eval_node(f->body, argc ? &params[0] : c->globals, out, c);
+    c->depth--;
+    return rc;
+}
+
 static int call(const Node *n, Value *args, Value *out, Ctx *c)
 {
     const char *name = n->name;
     size_t argc = n->nargs;
     int64_t k;
+    const UserFunc *uf = c->syms ? sym_func(c->syms, name) : NULL;
+    if (uf)
+        return call_user(uf, args, argc, out, c);
 #define IS(s) (strcmp(name, (s)) == 0)
 #define ARITY(k)                                                                      \
     do {                                                                              \
@@ -1553,6 +1576,11 @@ static int lookup(const char *name, const Binding *env, Value *out, Ctx *c)
             return 1;
         }
     }
+    const Value *v = c->syms ? sym_var(c->syms, name) : NULL;
+    if (v) {
+        val_copy(out, v);
+        return 1;
+    }
     return constant(name, out, c);
 }
 
@@ -1592,13 +1620,7 @@ static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
         return 0;
 
     case NODE_VAR:
-        for (const Binding *b = env; b; b = b->next) {
-            if (strcmp(b->name, n->name) == 0) {
-                val_copy(out, b->value);
-                return 0;
-            }
-        }
-        if (constant(n->name, out, c))
+        if (lookup(n->name, env, out, c))
             return 0;
         return split_name(n->name, env, out, c);
 
@@ -1650,6 +1672,10 @@ static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
     case NODE_SUM:
     case NODE_PROD:
         return big_op(n, env, out, c);
+
+    case NODE_ASSIGN:
+    case NODE_DEFUN:
+        return fail(c, "a definition can only be a whole line");
     }
     return fail(c, "internal error: unknown node");
 }
@@ -1657,7 +1683,7 @@ static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
 int eval(const Node *n, const Binding *env, const EvalOptions *opt, Value *out, char *err,
          size_t errlen)
 {
-    Ctx c = {err, errlen, opt->prec, opt->degrees};
+    Ctx c = {err, errlen, opt->prec, opt->degrees, opt->syms, env, 0};
     return eval_node(n, env, out, &c);
 }
 
@@ -1705,4 +1731,19 @@ char *val_to_str(const Value *v, int digits, int sci)
     free(re);
     free(ims);
     return out;
+}
+
+int eval_is_reserved(const char *name)
+{
+    static const char *const RESERVED[] = {
+        "sqrt", "cbrt", "root", "exp", "ln", "log", "log10", "log2", "sin", "cos", "tan", "asin",
+        "acos", "atan", "sinh", "cosh", "tanh", "abs", "arg", "re", "im", "conj", "floor", "ceil",
+        "round", "gcd", "lcm", "choose", "nCr", "binomial", "perm", "nPr", "sum", "prod", "product",
+        "pi", "e", "i", "ans", "Ans",
+        "\xCF\x80", "\xCE\xA3", "\xE2\x88\x91", "\xCE\xA0", "\xE2\x88\x8F",   /* π Σ ∑ Π ∏ */
+    };
+    for (size_t i = 0; i < sizeof RESERVED / sizeof *RESERVED; i++)
+        if (strcmp(name, RESERVED[i]) == 0)
+            return 1;
+    return 0;
 }

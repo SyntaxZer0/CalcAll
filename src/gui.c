@@ -403,8 +403,8 @@ static void evaluate(void)
     e->expr = row_clone(ed.root);
     val_init(&e->val);
     e->message = NULL;
-    if (ed.root->items[0]->kind == IT_CHAR && ed.root->items[0]->ch[0] == ':')
-        e->message = dup(out);   /* a command, like ":digits 30" */
+    if (!calc.result_is_value)
+        e->message = dup(out);   /* a command or a definition, like f(x) = x^2 */
     else
         val_copy(&e->val, &calc.ans);
     free(out);

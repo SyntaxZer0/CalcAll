@@ -103,7 +103,7 @@ Row *row_clone(const Row *src);
 void row_free(Row *r);
 
 /*
- * Text for the calculator engine, e.g. "((1)/(2))+3" (malloc'd). Sets
+ * Text for the calculator engine, e.g. "(1/2)+3" (malloc'd). Sets
  * *empty_box if any box was left empty. A sum or product with no variable
  * uses k.
  */

@@ -171,6 +171,10 @@ void node_free(Node *n)
         return;
     for (size_t i = 0; i < n->nargs; i++)
         node_free(n->args[i]);
+    for (size_t i = 0; i < n->nparams; i++)
+        free(n->params[i]);
+    free(n->params);
+    free(n->text);
     free(n->args);
     free(n->name);
     rat_free(&n->value);
@@ -376,6 +380,73 @@ static Node *parse_expr(Parser *P)
     return parse_chain(P, "+-", parse_term);
 }
 
+/*
+ * "x = ..." or "f(a, b) = ...". Looks ahead without consuming anything, and
+ * falls back to a plain expression when the line isn't a definition.
+ */
+static Node *parse_statement(Parser *P)
+{
+    Parser start = *P;
+    if (P->tok.kind == T_NAME) {
+        Token name = P->tok;
+        next(P);
+        if (is_op(P, '=')) {   /* x = expression */
+            next(P);
+            Node *value = parse_expr(P);
+            if (!value)
+                return NULL;
+            Node *n = new_node(NODE_ASSIGN, 1);
+            n->name = tok_dup(&name);
+            n->args[0] = value;
+            return n;
+        }
+        if (is_op(P, '(')) {   /* f(a, b) = expression? */
+            char *params[MAX_PARAMS];
+            size_t np = 0;
+            int ok = 1;
+            next(P);
+            while (ok && P->tok.kind == T_NAME && np < MAX_PARAMS) {
+                params[np++] = tok_dup(&P->tok);
+                next(P);
+                if (is_op(P, ','))
+                    next(P);
+                else
+                    break;
+            }
+            ok = np > 0 && is_op(P, ')');
+            if (ok) {
+                next(P);
+                ok = is_op(P, '=');
+            }
+            if (ok) {
+                next(P);
+                const char *body_start = P->tok.start;
+                Node *body = parse_expr(P);
+                if (!body) {
+                    while (np)
+                        free(params[--np]);
+                    return NULL;
+                }
+                Node *n = new_node(NODE_DEFUN, 1);
+                n->name = tok_dup(&name);
+                n->args[0] = body;
+                n->params = malloc(np * sizeof *n->params);
+                if (!n->params)
+                    exit(1);
+                memcpy(n->params, params, np * sizeof *params);
+                n->nparams = np;
+                Token t = {T_NAME, body_start, strlen(body_start), 0};
+                n->text = tok_dup(&t);
+                return n;
+            }
+            while (np)
+                free(params[--np]);
+        }
+    }
+    *P = start;   /* not a definition: rewind and read an expression */
+    return parse_expr(P);
+}
+
 Node *parse(const char *src, char *err, size_t errlen)
 {
     Parser P = {src, src, {T_END, src, 0, 0}, err, errlen, 0};
@@ -384,7 +455,7 @@ Node *parse(const char *src, char *err, size_t errlen)
         fail(&P, "empty expression");
         return NULL;
     }
-    Node *n = parse_expr(&P);
+    Node *n = parse_statement(&P);
     if (n && P.tok.kind != T_END)
         fail(&P, "unexpected '%.*s'", (int)P.tok.len, P.tok.start);
     if (P.failed) {
