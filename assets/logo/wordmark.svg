@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="400" viewBox="0 0 1400 400">
+  <rect width="1400" height="400" fill="#181a1f"/>
+  <g transform="translate(20 20) scale(0.351)">
+    <defs>
+      <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#2c3039"/><stop offset="1" stop-color="#15171c"/>
+      </linearGradient>
+      <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffb35c"/><stop offset="1" stop-color="#e8791c"/>
+      </linearGradient>
+      <linearGradient id="blue" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#5aa9f0"/><stop offset="1" stop-color="#3f86d8"/>
+      </linearGradient>
+    </defs>
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+    <rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
+    <path d="M300 285 L512 765 L724 285" fill="none" stroke="url(#orange)" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M366 486 C 420 420, 460 420, 512 466 S 600 512, 656 446" fill="none" stroke="url(#blue)" stroke-width="46" stroke-linecap="round"/>
+    <circle cx="441" cy="436" r="27" fill="#f4f5f8"/>
+    <circle cx="441" cy="436" r="11" fill="#3f86d8"/>
+  </g>
+  <text x="400" y="248" font-family="DejaVu Sans Mono" font-weight="bold" font-size="150" letter-spacing="-4">
+    <tspan fill="#e8eaf0">Calc</tspan><tspan fill="#f0943a">All</tspan>
+  </text>
+  <text x="404" y="306" font-family="DejaVu Sans Mono" font-size="34" fill="#8a909e" letter-spacing="2">exact math, tables and graphs</text>
+</svg>

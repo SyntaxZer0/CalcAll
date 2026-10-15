@@ -44,7 +44,16 @@ tests/graph_test: tests/graph_test.c $(ENGINE) $(HDR)
 tests/mathedit_test: tests/mathedit_test.c $(ENGINE) src/mathedit.c $(HDR)
 	$(CC) $(CFLAGS) -o $@ tests/mathedit_test.c $(ENGINE) src/mathedit.c $(LDLIBS)
 
-clean:
-	rm -f calc calc-gui tests/mathedit_test tests/graph_test
+# macOS: CalcAll.app, with its icon in the Dock (open CalcAll.app, or drag it to Applications)
+app: calc-gui
+	rm -rf CalcAll.app
+	mkdir -p CalcAll.app/Contents/MacOS CalcAll.app/Contents/Resources
+	cp calc-gui CalcAll.app/Contents/MacOS/
+	cp -R assets CalcAll.app/Contents/MacOS/
+	cp assets/logo/CalcAll.icns CalcAll.app/Contents/Resources/
+	cp assets/logo/Info.plist CalcAll.app/Contents/
 
-.PHONY: gui test clean
+clean:
+	rm -rf calc calc-gui tests/mathedit_test tests/graph_test CalcAll.app
+
+.PHONY: gui app test clean

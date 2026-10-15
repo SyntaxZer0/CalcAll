@@ -1,5 +1,7 @@
 # Calc
 
+![CalcAll](assets/logo/wordmark.png)
+
 A calculator in C that keeps numbers exact. Whole numbers show every digit
 (no `E+10` unless you ask for it), fractions stay fractions, and sums and
 products (Σ and Π) are built in. Roots, logs and trig give an exact answer
@@ -113,6 +115,9 @@ Curves are drawn with a fast floating-point evaluator so panning stays
 smooth; asymptotes (1/x, tan x) and jumps (floor x) are left as gaps instead
 of being joined up. Graph lines can use your own variables and functions,
 and their own definitions stay local to the graph.
+
+On macOS, `make app` builds **CalcAll.app**, which has the logo as its Dock
+icon; open it with `open CalcAll.app` or drag it into Applications.
 
 Run it from the repository folder, or keep the `assets` folder next to
 `calc-gui`, so it can find its font.

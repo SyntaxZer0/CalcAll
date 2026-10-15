@@ -2726,6 +2726,15 @@ int main(void)
     SetExitKey(KEY_NULL);   /* Esc clears instead of quitting */
     SetTargetFPS(60);
     font = load_font();
+    /* The window's icon (Linux and Windows; on macOS the app bundle's icon is used). */
+    const char *icon = TextFormat("%sassets/logo/icon-256.png", GetApplicationDirectory());
+    if (!FileExists(icon))
+        icon = "assets/logo/icon-256.png";
+    if (FileExists(icon)) {
+        Image img = LoadImage(icon);
+        SetWindowIcon(img);
+        UnloadImage(img);
+    }
     calc_init(&calc);
     calc_use_store(&calc, calc_default_store());   /* bring back saved definitions */
     ed_init(&ed);

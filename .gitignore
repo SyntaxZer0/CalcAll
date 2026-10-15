@@ -2,4 +2,5 @@ calc
 calc-gui
 tests/mathedit_test
 tests/graph_test
+CalcAll.app/
 *.o
