@@ -29,7 +29,7 @@ typedef enum {
     NODE_PROD,   /* product of args[2] for `name` from args[0] to args[1] */
     NODE_ASSIGN, /* name = args[0]  (only as a whole line) */
     NODE_DEFUN,  /* name(params...) = args[0]  (only as a whole line) */
-    NODE_REL,    /* args[0] `op` args[1], op one of = < > l (<=) g (>=); graph lines only */
+    NODE_REL,    /* args[0] `op` args[1], op one of = < > l (<=) g (>=) n (!=); a check or graph */
     NODE_POINTS  /* points (args[0], args[1]), (args[2], args[3]), ...; graph lines only */
 } NodeKind;
 
@@ -49,10 +49,14 @@ struct Node {
 };
 
 /*
- * Parses a line: an expression, "x = expression", or "f(x, y) = expression".
+ * Parses a line: an expression, "x = expression", "f(x, y) = expression", or
+ * a true or false check like "2 + 2 = 4" or "1 < x < 3" (NODE_REL).
  * Returns NULL and writes a message to err on a syntax error.
  */
 Node *parse(const char *src, char *err, size_t errlen);
+
+/* Like parse(), but "=" always checks: "pi = 3" and "sin(pi) = 0" aren't definitions. */
+Node *parse_check(const char *src, char *err, size_t errlen);
 
 /*
  * Like parse(), for a line of a graph, which can also be an equation or

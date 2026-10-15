@@ -108,6 +108,14 @@ static int is_op(const Parser *P, char op)
     return P->tok.kind == T_OP && P->tok.op == op;
 }
 
+/* ≤, ≥ or ≠: symbols that end an expression rather than multiply it. */
+static int is_relation_symbol(const Token *t)
+{
+    return t->kind == T_NAME && t->len == 3 &&
+           (memcmp(t->start, "\xE2\x89\xA4", 3) == 0 || memcmp(t->start, "\xE2\x89\xA5", 3) == 0 ||
+            memcmp(t->start, "\xE2\x89\xA0", 3) == 0);
+}
+
 static int expect(Parser *P, char op)
 {
     if (is_op(P, op)) {
@@ -286,7 +294,7 @@ static Node *parse_primary(Parser *P)
 static Node *parse_postfix(Parser *P)
 {
     Node *n = parse_primary(P);
-    while (n && is_op(P, '!')) {
+    while (n && is_op(P, '!') && P->p[0] != '=') {   /* "!=" is "not equal", not a factorial */
         next(P);
         Node *f = new_node(NODE_FACT, 1);
         f->args[0] = n;
@@ -360,7 +368,8 @@ static Node *parse_term(Parser *P)
         if (P->tok.kind == T_OP && strchr("*/%", P->tok.op)) {
             op = P->tok.op;
             next(P);
-        } else if (P->tok.kind == T_NUM || P->tok.kind == T_NAME || is_op(P, '(')) {
+        } else if (P->tok.kind == T_NUM || (P->tok.kind == T_NAME && !is_relation_symbol(&P->tok)) ||
+                   is_op(P, '(')) {
             op = '*';
         } else {
             break;
@@ -390,7 +399,7 @@ static Node *parse_statement(Parser *P)
     if (P->tok.kind == T_NAME) {
         Token name = P->tok;
         next(P);
-        if (is_op(P, '=')) {   /* x = expression */
+        if (is_op(P, '=') && P->p[0] != '=') {   /* x = expression, but not x == 3 */
             next(P);
             Node *value = parse_expr(P);
             if (!value)
@@ -447,7 +456,61 @@ static Node *parse_statement(Parser *P)
     return parse_expr(P);
 }
 
-Node *parse(const char *src, char *err, size_t errlen)
+/*
+ * A relation operator at the current token: = == < > <= >= != ≤ ≥ ≠.
+ * Returns '=', '<', '>', 'l' (<=), 'g' (>=) or 'n' (not equal), or 0.
+ */
+static char relation_op(Parser *P)
+{
+    if (P->tok.kind == T_NAME && P->tok.len == 3 && memcmp(P->tok.start, "\xE2\x89\xA4", 3) == 0)
+        return 'l';
+    if (P->tok.kind == T_NAME && P->tok.len == 3 && memcmp(P->tok.start, "\xE2\x89\xA5", 3) == 0)
+        return 'g';
+    if (P->tok.kind == T_NAME && P->tok.len == 3 && memcmp(P->tok.start, "\xE2\x89\xA0", 3) == 0)
+        return 'n';
+    if (P->tok.kind != T_OP || !strchr("=<>!", P->tok.op))
+        return 0;
+    char op = P->tok.op;
+    if (P->p[0] == '=') {   /* <=, >=, == and != */
+        P->p++;
+        return op == '<' ? 'l' : op == '>' ? 'g' : op == '!' ? 'n' : '=';
+    }
+    if (op == '<' && P->p[0] == '>') {   /* <> */
+        P->p++;
+        return 'n';
+    }
+    return op == '!' ? 0 : op;
+}
+
+/*
+ * After the expression `n`: "= rhs", "< rhs" and so on, as a NODE_REL.
+ * With `chain`, "1 < x < 3" works too, as REL(REL(1, x), 3). Frees n on error.
+ */
+static Node *parse_relations(Parser *P, Node *n, int chain)
+{
+    char op;
+    while (n && n->kind != NODE_DEFUN && (op = relation_op(P)) != 0) {
+        /* a definition like "y = x" can't go on to "< 1" */
+        if (n->kind == NODE_ASSIGN || (!chain && n->kind == NODE_REL)) {
+            fail(P, "unexpected '%.*s'", (int)P->tok.len, P->tok.start);
+            return n;
+        }
+        next(P);
+        Node *rhs = parse_expr(P);
+        if (!rhs) {
+            node_free(n);
+            return NULL;
+        }
+        Node *rel = new_node(NODE_REL, 2);
+        rel->op = op;
+        rel->args[0] = n;
+        rel->args[1] = rhs;
+        n = rel;
+    }
+    return n;
+}
+
+static Node *parse_line(const char *src, char *err, size_t errlen, int definitions)
 {
     Parser P = {src, src, {T_END, src, 0, 0}, err, errlen, 0};
     next(&P);
@@ -455,7 +518,7 @@ Node *parse(const char *src, char *err, size_t errlen)
         fail(&P, "empty expression");
         return NULL;
     }
-    Node *n = parse_statement(&P);
+    Node *n = parse_relations(&P, definitions ? parse_statement(&P) : parse_expr(&P), 1);
     if (n && P.tok.kind != T_END)
         fail(&P, "unexpected '%.*s'", (int)P.tok.len, P.tok.start);
     if (P.failed) {
@@ -465,21 +528,14 @@ Node *parse(const char *src, char *err, size_t errlen)
     return n;
 }
 
-/* A relation operator at the current token: =, <, >, <=, >=, ≤ or ≥. */
-static char relation_op(Parser *P)
+Node *parse(const char *src, char *err, size_t errlen)
 {
-    if (P->tok.kind == T_NAME && P->tok.len == 3 && memcmp(P->tok.start, "\xE2\x89\xA4", 3) == 0)
-        return 'l';
-    if (P->tok.kind == T_NAME && P->tok.len == 3 && memcmp(P->tok.start, "\xE2\x89\xA5", 3) == 0)
-        return 'g';
-    if (P->tok.kind != T_OP || !strchr("=<>", P->tok.op))
-        return 0;
-    char op = P->tok.op;
-    if (op != '=' && P->p[0] == '=') {   /* <= and >= */
-        P->p++;
-        return op == '<' ? 'l' : 'g';
-    }
-    return op;
+    return parse_line(src, err, errlen, 1);
+}
+
+Node *parse_check(const char *src, char *err, size_t errlen)
+{
+    return parse_line(src, err, errlen, 0);
 }
 
 /* "(a, b)" or "(a, b), (c, d), ..."; NULL (and *P untouched) if it isn't one. */
@@ -527,27 +583,7 @@ Node *parse_graph_line(const char *src, char *err, size_t errlen)
     Node *n = is_op(&P, '(') ? parse_points(&P) : NULL;
     if (n)
         return n;
-    n = parse_statement(&P);
-    char op;
-    if (n && n->kind != NODE_DEFUN && (op = relation_op(&P)) != 0) {
-        /* "x^2 + y^2 = 1" or "y < x": a definition like "y = x" can't go on to "< 1" */
-        if (n->kind == NODE_ASSIGN) {
-            fail(&P, "unexpected '%.*s'", (int)P.tok.len, P.tok.start);
-        } else {
-            next(&P);
-            Node *rhs = parse_expr(&P);
-            if (rhs) {
-                Node *rel = new_node(NODE_REL, 2);
-                rel->op = op;
-                rel->args[0] = n;
-                rel->args[1] = rhs;
-                n = rel;
-            } else {
-                node_free(n);
-                n = NULL;
-            }
-        }
-    }
+    n = parse_relations(&P, parse_statement(&P), 0);   /* "x^2 + y^2 = 1" or "y < x" */
     if (n && P.tok.kind != T_END)
         fail(&P, "unexpected '%.*s'", (int)P.tok.len, P.tok.start);
     if (P.failed) {

@@ -162,6 +162,10 @@ int main(void)
         {"sum(k=1,3,gcd(k,6))", "sum(k=1, 3, gcd(k,6))", "6"},
         {"exp(0)+pi*0", "e^0+\xCF\x80*0", "1"},
         {"sumx", "sum(x=, , )", NULL},   /* x goes in the variable box */
+        {"1/3+1/6=1/2", "(1/3)+(1/6)=(1/2)", "True"},   /* true or false checks */
+        {"1/2<=1", "(1/2)\xE2\x89\xA4" "1", "True"},
+        {"3>=4", "3\xE2\x89\xA5" "4", "False"},
+        {"2^3!=6", "2^3\xE2\x89\xA0" "6", "True"},   /* "!=" isn't a factorial in the exponent */
     };
     for (size_t i = 0; i < sizeof typed / sizeof *typed; i++) {
         ed_clear(&e);

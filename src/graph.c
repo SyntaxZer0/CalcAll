@@ -200,6 +200,10 @@ static void classify_points(GraphRow *r, FEnv *env, char *const *ranges, int i)
 static void classify_relation(GraphRow *r, FEnv *env)
 {
     const Node *t = r->tree;
+    if (t->op == 'n') {
+        set_error(r, "\xE2\x89\xA0 can't be graphed: use = < > \xE2\x89\xA4 or \xE2\x89\xA5");
+        return;
+    }
     r->fx = fexpr_compile(env, t, XY_PARAMS, 2);   /* compiles to lhs - rhs */
     note_unknowns(r, r->fx);
     if (has_unknown(r, "r") || has_unknown(r, "\xCE\xB8")) {

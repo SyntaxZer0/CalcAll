@@ -2966,7 +2966,7 @@ static Font load_font(void)
         "abcdefghijklmnopqrstuvwxyz{|}~"
         "\xE2\x89\x88\xCF\x80\xCE\xA3\xCE\xA0\xE2\x88\x91\xE2\x88\x8F\xE2\x88\x9A"
         "\xC3\xB7\xC3\x97\xE2\x88\x92\xE2\x8C\xAB\xCA\xB8\xE2\x80\xA6\xE2\x81\xBB\xC2\xB9"
-        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7\xE2\x86\x90\xE2\x86\x91\xE2\x86\x93\xE2\x8C\x82\xCE\xB8\xE2\x89\xA4\xE2\x89\xA5";
+        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7\xE2\x86\x90\xE2\x86\x91\xE2\x86\x93\xE2\x8C\x82\xCE\xB8\xE2\x89\xA4\xE2\x89\xA5\xE2\x89\xA0";
     int count;
     int *cps = LoadCodepoints(chars, &count);
 
@@ -2981,7 +2981,7 @@ static Font load_font(void)
     }
     UnloadCodepoints(cps);
     if (f.texture.id == 0) {
-        TraceLog(LOG_WARNING, "Calc: %s not found, symbols like pi won't draw", FONT_FILE);
+        TraceLog(LOG_WARNING, "CalcAll: %s not found, symbols like pi won't draw", FONT_FILE);
         return GetFontDefault();
     }
     SetTextureFilter(f.texture, TEXTURE_FILTER_BILINEAR);
@@ -2991,7 +2991,7 @@ static Font load_font(void)
 int main(void)
 {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
-    InitWindow(480, 800, "Calc");
+    InitWindow(480, 800, "CalcAll");
     SetWindowMinSize(380, 660);
     SetExitKey(KEY_NULL);   /* Esc clears instead of quitting */
     SetTargetFPS(60);

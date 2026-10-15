@@ -163,7 +163,7 @@ session 17 'f(x) = x^2 + 1' 'h(n) = sum(k=1, n, f(k))' 'h(3)'
 session 101 'f(t) = t^2 + x' 'x = 1' 'f(10)'
 session 250 'x = 10' 'y = 25' 'xy'
 session 'error: fact calls itself too many times' 'fact(n) = n fact(n-1)' 'fact(3)'
-session "error: 'pi' is built in and can't be changed" 'pi = 3'
+session False 'pi = 3'   # a built-in can't be defined, so it's a true or false check
 session "error: 'sin' is built in and can't be redefined" 'sin(x) = 2'
 session "error: parameter 'a' appears twice" 'g(a, a) = a'
 session 'error: f takes 1 argument' 'f(x) = x' 'f(1, 2)'
@@ -190,6 +190,30 @@ session 11 '5 + 5' 'ans + 1'
 session '1.2676506002282294014...e+30' ':sci' '2^100'
 session '-1.25e-4' ':sci' '-1/8000'
 session '0.333...  (= 1/3)' ':digits 3' '1/3'
+
+# True or false checks, like a Casio's verify mode
+check '2 + 2 = 4' True
+check '2 + 2 = 5' False
+check '0.1 + 0.2 == 0.3' True
+check 'sqrt(2)^2 = 2' True
+check 'sin(pi) = 0' True
+check 'e^(i pi) = -1' True
+check 'pi = 355/113' False
+check 'pi > 3.14' True
+check '1/3 = 0.3333333333' False
+check '3 != 4' True
+check '3 ≠ 3' False
+check '2 <> 2' False
+check '3 ≤ 3' True
+check '4 >= 5' False
+check '5! = 120' True
+check '1 < 2 < 3' True
+check '1 < 3 < 2' False
+check 'i < 2' 'error: complex numbers can'"'"'t be compared with < or >, only = and ≠'
+check 'x = 3 < 4' "error: unexpected '<' (at column 7)"
+session True 'x = 3' 'x == 3'
+session True 'x = 3' '2x + 1 = 7'
+session 3 'x = 3' '1 < 2' 'ans'
 
 # Saving: definitions come back in a new run, exact or approximate as before
 store=$(mktemp)

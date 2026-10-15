@@ -358,9 +358,24 @@ void ed_type(Editor *e, const char *ch)
         return;
     }
 
+    /* "<=", ">=" and "!=" become the symbols, for checks like 3 ≤ 4. In
+     * "2^3!=6" the "!" was in the exponent, so the "≠" leaves it below. */
+    if (c == '=' && e->pos > 0) {
+        static const char *const SYMBOL[][2] = {
+            {"<", "\xE2\x89\xA4"}, {">", "\xE2\x89\xA5"}, {"!", "\xE2\x89\xA0"}};
+        for (size_t i = 0; i < sizeof SYMBOL / sizeof *SYMBOL; i++)
+            if (is_char(e->row->items[e->pos - 1], SYMBOL[i][0][0])) {
+                item_free(row_remove(e->row, e->pos - 1));
+                e->pos--;
+                ch = SYMBOL[i][1];
+                c = '<';   /* an operator, for what follows */
+                break;
+            }
+    }
+
     /* An operator ends a denominator or exponent that was typed without
      * parentheses ("1/2+3" is a half plus three), possibly several levels. */
-    while (c && strchr("+-*/%,)=", c) && e->row->owner &&
+    while (c && strchr("+-*/%,)=<>", c) && e->row->owner &&
            e->row->owner->closes == CLOSE_ON_OPERATOR && !open_paren(e->row, e->pos) &&
            !(c == '-' && e->row->len == 0))
         leave(e, e->row->owner);

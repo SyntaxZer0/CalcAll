@@ -29,6 +29,7 @@ static const char HELP[] =
     "Commands:   :deg  :rad  :sci  :fix  :digits N  :help  :quit\n"
     "Saving:     :vars  :clear [name]  :save [file]  :load file   (saved automatically)\n"
     "History:    :history [N]  :history clear   (kept between runs)\n"
+    "Checks:     2 + 2 = 4  \xE2\x86\x92 True    sqrt(2) > 1.5   x == 3   1 < x \xE2\x89\xA4 5   3 != 4 (or \xE2\x89\xA0)\n"
     "Tables:     :table x^2 + 1 from 1 to 5 step 1    (add ; g(x) after f(x) for two columns)\n"
     "\xE2\x89\x88 marks an approximate result; everything else is exact.";
 
@@ -815,6 +816,81 @@ static int define_line(Calc *c, const char *line)
     return out != NULL;
 }
 
+/* ---- True or false checks: 2 + 2 = 4, sqrt(2) < 1.5, 1 < x < 3 ---------------- */
+
+/*
+ * Is |d| small enough to call a and b equal? Exact values must match exactly.
+ * Approximate ones only agree to about as many digits as are shown, so they
+ * count as equal when they agree to that many: sqrt(2)^2 = 2 is true. Next to
+ * an exact 0, "small" means below 10^-(digits + 5), so sin(pi) = 0 is too.
+ */
+static int negligible(const Calc *c, const Rational *d, const Rational *a, const Rational *b, int exact)
+{
+    if (rat_is_zero(d) || exact)
+        return rat_is_zero(d);
+    double la = rat_log10_abs(a), lb = rat_log10_abs(b);
+    double scale = la > lb ? la : lb;
+    if (rat_is_zero(a) || rat_is_zero(b))
+        scale = -5;
+    return rat_log10_abs(d) < scale - c->digits;
+}
+
+/* Compares a and b with op (see NODE_REL); -1 with a message if it can't. */
+static int compare(const Calc *c, char op, const Value *a, const Value *b, char *err, size_t errlen)
+{
+    int exact = a->exact && b->exact;
+    Rational d, dim;
+    rat_init(&d);
+    rat_init(&dim);
+    rat_sub(&d, &a->r, &b->r);
+    rat_sub(&dim, &a->im, &b->im);
+    /* one scale for both parts, so 1 + 1e-40i counts as 1 */
+    const Rational *big_a = rat_log10_abs(&a->im) > rat_log10_abs(&a->r) ? &a->im : &a->r;
+    const Rational *big_b = rat_log10_abs(&b->im) > rat_log10_abs(&b->r) ? &b->im : &b->r;
+    int re_zero = negligible(c, &d, big_a, big_b, exact);
+    int im_zero = negligible(c, &dim, big_a, big_b, exact);
+    int sign = re_zero ? 0 : rat_sign(&d);
+    rat_free(&d);
+    rat_free(&dim);
+
+    if (op == '=' || op == 'n')
+        return (re_zero && im_zero) == (op == '=');
+    if (!negligible(c, &a->im, &a->im, &b->r, exact) || !negligible(c, &b->im, &b->im, &a->r, exact)) {
+        snprintf(err, errlen, "complex numbers can't be compared with < or >, only = and \xE2\x89\xA0");
+        return -1;
+    }
+    switch (op) {
+    case '<': return sign < 0;
+    case '>': return sign > 0;
+    case 'l': return sign <= 0;
+    default:  return sign >= 0;   /* 'g' */
+    }
+}
+
+/*
+ * Works out a check like "2 + 2 = 4", or a chain like "1 < x < 3" (every
+ * step must hold). Leaves the rightmost side in *right. Returns 1 for true,
+ * 0 for false, -1 on error.
+ */
+static int check(Calc *c, const Node *rel, Value *right, char *err, size_t errlen)
+{
+    Value left;
+    val_init(&left);
+    int truth = 1;
+    if (rel->args[0]->kind == NODE_REL)
+        truth = check(c, rel->args[0], &left, err, errlen);
+    else if (eval_with(c, rel->args[0], NULL, NULL, &left, err, errlen))
+        truth = -1;
+    if (truth >= 0 && eval_with(c, rel->args[1], NULL, NULL, right, err, errlen))
+        truth = -1;
+    if (truth >= 0) {
+        int holds = compare(c, rel->op, &left, right, err, errlen);
+        truth = holds < 0 ? -1 : truth && holds;
+    }
+    val_free(&left);
+    return truth;
+}
+
 char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
 {
     c->result_is_value = 0;
@@ -828,11 +904,37 @@ char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
     Node *tree = parse(line, err, errlen);
     if (!tree)
         return NULL;
+    char builtin[200] = "";   /* why the line can't be a definition, if it looked like one */
+    if ((tree->kind == NODE_ASSIGN || tree->kind == NODE_DEFUN) && eval_is_reserved(tree->name)) {
+        /* "pi = 3.14" or "sin(pi) = 0" can't be definitions, so they're checks */
+        snprintf(builtin, sizeof builtin, "'%s' is built in and can't be %s", tree->name,
+                 tree->kind == NODE_ASSIGN ? "changed" : "redefined");
+        char msg[200];
+        Node *as_check = parse_check(line, msg, sizeof msg);
+        if (as_check) {
+            node_free(tree);
+            tree = as_check;
+        }
+    }
     if (tree->kind == NODE_DEFUN) {
         char *out = define_function(c, tree, err, errlen);
         node_free(tree);
         if (out)
             record(c, line, out);
+        return out;
+    }
+    if (tree->kind == NODE_REL) {
+        Value right;
+        val_init(&right);
+        int truth = check(c, tree, &right, err, errlen);
+        val_free(&right);
+        node_free(tree);
+        if (truth < 0 && builtin[0])   /* "sin(x) = 2" with no x: it was meant as a definition */
+            snprintf(err, errlen, "%s", builtin);
+        if (truth < 0)
+            return NULL;
+        char *out = dup_str(truth ? "True" : "False");
+        record(c, line, out);
         return out;
     }
     if (tree->kind == NODE_ASSIGN && eval_is_reserved(tree->name)) {

@@ -1,4 +1,4 @@
-# Calc
+# CalcAll
 
 ![CalcAll](assets/logo/wordmark.png)
 
@@ -130,6 +130,15 @@ Run it from the repository folder, or keep the `assets` folder next to
 
 ## What it understands
 
+Typing a comparison checks it, like the verify mode on a Casio: `2 + 2 = 4`
+says True, and `<`, `>`, `<=` (≤), `>=` (≥) and `!=` (≠) work too, chained if
+you like (`1 < x < 3`). In the window, `<=`, `>=` and `!=` turn into ≤, ≥ and ≠
+as you type. Exact values must match exactly; approximate ones count as equal
+when they agree to the digits shown, so `sqrt(2)^2 = 2` is True. `x = 3`
+still sets x, so check a variable with `x == 3`. `!=` always means "not
+equal": to check a factorial, write `(3!) = 6` (or `3! = 6` with a space, in
+the terminal).
+
 | | |
 |---|---|
 | Operators | `+ - * / % ^ !` and parentheses |
@@ -148,6 +157,7 @@ Run it from the repository folder, or keep the `assets` folder next to
 | Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:help`, `:quit` |
 | Definitions | `:vars`, `:clear [name]`, `:save [file]`, `:load file` |
 | History | `:history [N]` lists past calculations, `:history clear` forgets them |
+| True or false | `2 + 2 = 4` → True, `sqrt(2)^2 = 2`, `pi > 3.14`, `1 < x ≤ 5`, `x == 3`, `3 != 4` (or `≠`, `<>`) |
 | Tables | `:table x^2 + 1 from 1 to 5 step 1`, `:table sin(x); cos(x) from 0 to pi step pi/4` |
 
 Approximate results are computed with 10 more digits than are shown, so
