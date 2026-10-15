@@ -501,20 +501,30 @@ static size_t utf8_offset(const char *s, size_t n)
 /* Right-aligned text in the bottom of `area`, wrapped, shrinking if needed. */
 static void draw_text_result(const char *s, Rectangle area, Color c)
 {
-    static const float sizes[] = {36, 28, 22, 18};
+    /* Shrink to fit on one line if possible (down to 20); only longer
+     * results wrap, at the largest size where all the lines fit. */
+    static const float sizes[] = {36, 32, 28, 24, 20, 18};
+    const int count = sizeof sizes / sizeof *sizes;
     size_t n = utf8_len(s);
     float size = 18, cw = 0;
     size_t per_line = 1, max_lines = 1;
-    for (size_t i = 0; i < sizeof sizes / sizeof *sizes; i++) {
-        size = sizes[i];
-        cw = tw("0", size);   /* every character is this wide in a monospaced font */
-        per_line = (size_t)(area.width / cw);
-        max_lines = (size_t)(area.height / (size * 1.15f));
-        if (per_line < 1)
-            per_line = 1;
-        if (max_lines < 1)
-            max_lines = 1;
-        if ((n + per_line - 1) / per_line <= max_lines)
+    for (int pass = 0; pass < 2; pass++) {
+        int found = 0;
+        for (int i = 0; i < count && !found; i++) {
+            size = sizes[i];
+            cw = tw("0", size);   /* every character is this wide in a monospaced font */
+            per_line = (size_t)(area.width / cw);
+            max_lines = (size_t)(area.height / (size * 1.15f));
+            if (per_line < 1)
+                per_line = 1;
+            if (max_lines < 1)
+                max_lines = 1;
+            if (pass == 0)
+                found = size >= 20 && n <= per_line;
+            else
+                found = (n + per_line - 1) / per_line <= max_lines;
+        }
+        if (found)
             break;
     }
 
