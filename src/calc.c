@@ -26,7 +26,8 @@ static const char HELP[] =
     "Variables:  x = 5   rate = 0.05   then use x, rate   (ans = previous result)\n"
     "Functions:  f(x) = x^2 + 1   g(a, b) = sqrt(a^2 + b^2)   then f(3), g(3, 4)\n"
     "Implicit:   2pi  3(4+1)  2sin(30)  mean 2*pi, 3*(4+1), 2*sin(30)\n"
-    "Commands:   :deg  :rad  :sci  :fix  :digits N  :vars  :clear [name]  :help  :quit\n"
+    "Commands:   :deg  :rad  :sci  :fix  :digits N  :help  :quit\n"
+    "Saving:     :vars  :clear [name]  :save [file]  :load file   (saved automatically)\n"
     "\xE2\x89\x88 marks an approximate result; everything else is exact.";
 
 static char *dup_str(const char *s)
@@ -45,12 +46,14 @@ void calc_init(Calc *c)
     val_init(&c->ans);
     sym_init(&c->syms);
     c->result_is_value = 0;
+    c->store = NULL;
 }
 
 void calc_free(Calc *c)
 {
     val_free(&c->ans);
     sym_free(&c->syms);
+    free(c->store);
 }
 
 /* Growable string for building messages. */
@@ -121,6 +124,179 @@ static char *list_symbols(Calc *c)
     return b.s;
 }
 
+/* ---- Saving definitions ------------------------------------------------------
+ *
+ * The file is plain text, one definition per line:
+ *
+ *     var x 1 1/3 0/1          name, exact (1) or approximate (0), real part,
+ *                              imaginary part, as exact fractions
+ *     fn f(x) = x^2 + 1        a function, exactly as defined
+ */
+
+static void put_rat(Buf *b, const Rational *r)
+{
+    char *n = bi_to_str(&r->num), *d = bi_to_str(&r->den);
+    put(b, " ");
+    put(b, n);
+    put(b, "/");
+    put(b, d);
+    free(n);
+    free(d);
+}
+
+/* Writes every definition to `path`. Returns how many, or -1 on failure. */
+static int save_store(Calc *c, const char *path)
+{
+    Buf b = {0};
+    put(&b, "# Calc definitions; written automatically\n");
+    for (int i = 0; i < c->syms.nvars; i++) {
+        const UserVar *v = &c->syms.vars[i];
+        put(&b, "var ");
+        put(&b, v->name);
+        put(&b, v->value.exact ? " 1" : " 0");
+        put_rat(&b, &v->value.r);
+        put_rat(&b, &v->value.im);
+        put(&b, "\n");
+    }
+    for (int i = 0; i < c->syms.nfuncs; i++) {
+        put(&b, "fn ");
+        put_func(&b, &c->syms.funcs[i]);
+        put(&b, "\n");
+    }
+
+    /* Write a temporary file and rename it over the old one, so a crash
+     * halfway through never leaves a half-written file. */
+    size_t n = strlen(path) + 5;
+    char *tmp = malloc(n);
+    if (!tmp)
+        exit(1);
+    snprintf(tmp, n, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    int ok = f && fputs(b.s, f) >= 0;
+    if (f && fclose(f) != 0)
+        ok = 0;
+    if (ok)
+        ok = rename(tmp, path) == 0;
+    if (!ok)
+        remove(tmp);
+    free(tmp);
+    free(b.s);
+    return ok ? c->syms.nvars + c->syms.nfuncs : -1;
+}
+
+/* After a change: save if there's a store. Appends a note to *msg on failure. */
+static void autosave(Calc *c, char **msg)
+{
+    if (!c->store || save_store(c, c->store) >= 0)
+        return;
+    Buf b = {0};
+    put(&b, *msg ? *msg : "");
+    put(&b, " (couldn't save to ");
+    put(&b, c->store);
+    put(&b, ")");
+    free(*msg);
+    *msg = b.s;
+}
+
+/* "-12/5" -> -12/5. Returns 0 on success. */
+static int parse_fraction(Rational *r, const char *s)
+{
+    const char *slash = strchr(s, '/');
+    int neg = *s == '-';
+    if (!slash || slash == s + neg)
+        return -1;
+    BigInt n, d;
+    bi_init(&n);
+    bi_init(&d);
+    int ok = bi_set_str(&n, s + neg, (size_t)(slash - s - neg)) == 0 &&
+             bi_set_str(&d, slash + 1, strlen(slash + 1)) == 0 && !bi_is_zero(&d);
+    if (ok) {
+        if (neg)
+            bi_neg(&n);
+        rat_set_frac(r, &n, &d);
+    }
+    bi_free(&n);
+    bi_free(&d);
+    return ok ? 0 : -1;
+}
+
+/* One line of any length, without the newline; NULL at the end of the file. */
+static char *read_line(FILE *f)
+{
+    Buf b = {0};
+    int ch;
+    char one[2] = {0, 0};
+    while ((ch = fgetc(f)) != EOF && ch != '\n') {
+        one[0] = (char)ch;
+        put(&b, one);
+    }
+    if (ch == EOF && !b.s)
+        return NULL;
+    if (!b.s)
+        put(&b, "");
+    if (b.len && b.s[b.len - 1] == '\r')
+        b.s[--b.len] = '\0';
+    return b.s;
+}
+
+static int define_line(Calc *c, const char *line);
+
+/* Reads definitions from `path`. Returns how many, or -1 if it can't be read. */
+static int load_store(Calc *c, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    int count = 0;
+    char *line;
+    while ((line = read_line(f))) {
+        if (strncmp(line, "fn ", 3) == 0) {
+            count += define_line(c, line + 3);
+        } else if (strncmp(line, "var ", 4) == 0) {
+            char *name = strtok(line + 4, " "), *exact = strtok(NULL, " ");
+            char *re = strtok(NULL, " "), *im = strtok(NULL, " ");
+            Value v;
+            val_init(&v);
+            if (name && exact && re && im && !eval_is_reserved(name) &&
+                parse_fraction(&v.r, re) == 0 && parse_fraction(&v.im, im) == 0) {
+                v.exact = strcmp(exact, "1") == 0;
+                sym_set_var(&c->syms, name, &v);
+                count++;
+            }
+            val_free(&v);
+        }
+        free(line);
+    }
+    fclose(f);
+    return count;
+}
+
+const char *calc_default_store(void)
+{
+    static char path[4096];
+    const char *env = getenv("CALC_DEFINITIONS");
+    if (env)
+        return *env ? env : NULL;
+    const char *home = getenv("HOME");
+    if (!home || !*home)
+        return NULL;
+    snprintf(path, sizeof path, "%s/.calc_definitions", home);
+    return path;
+}
+
+int calc_use_store(Calc *c, const char *path)
+{
+    free(c->store);
+    c->store = path ? dup_str(path) : NULL;
+    if (!path)
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;   /* nothing saved yet */
+    fclose(f);
+    return load_store(c, path);
+}
+
 static char *command(Calc *c, const char *cmd, char *err, size_t errlen)
 {
     char word[32], extra[2];
@@ -151,6 +327,30 @@ static char *command(Calc *c, const char *cmd, char *err, size_t errlen)
     }
     if (strcmp(word, "vars") == 0)
         return list_symbols(c);
+    if (strcmp(word, "save") == 0 || strcmp(word, "load") == 0) {
+        char path[1024];
+        int load = word[0] == 'l';
+        if (sscanf(cmd, "%31s %1023[^\n]", word, path) != 2) {
+            if (load || !c->store) {
+                snprintf(err, errlen, "usage: :%s file", load ? "load" : "save");
+                return NULL;
+            }
+            snprintf(path, sizeof path, "%s", c->store);
+        }
+        int n = load ? load_store(c, path) : save_store(c, path);
+        if (n < 0) {
+            snprintf(err, errlen, "couldn't %s %s", load ? "read" : "write", path);
+            return NULL;
+        }
+        char *out = malloc(strlen(path) + 64);
+        if (!out)
+            exit(1);
+        sprintf(out, "%s %d definition%s %s %s", load ? "loaded" : "saved", n, n == 1 ? "" : "s",
+                load ? "from" : "to", path);
+        if (load)
+            autosave(c, &out);
+        return out;
+    }
     if (strcmp(word, "clear") == 0) {
         char name[64];
         if (sscanf(cmd, "%31s %63s", word, name) == 2) {
@@ -159,12 +359,16 @@ static char *command(Calc *c, const char *cmd, char *err, size_t errlen)
                 return NULL;
             }
             snprintf(msg, sizeof msg, "removed %s", name);
-            return dup_str(msg);
+            char *out = dup_str(msg);
+            autosave(c, &out);
+            return out;
         }
         int n = c->syms.nvars + c->syms.nfuncs;
         sym_free(&c->syms);
         snprintf(msg, sizeof msg, "removed %d definition%s", n, n == 1 ? "" : "s");
-        return dup_str(msg);
+        char *out = dup_str(msg);
+        autosave(c, &out);
+        return out;
     }
     if (strcmp(word, "digits") == 0) {
         if (sscanf(cmd, "%31s %d %1s", word, &n, extra) != 2 || n < 1 || n > MAX_DIGITS) {
@@ -201,7 +405,27 @@ static char *define_function(Calc *c, Node *tree, char *err, size_t errlen)
 
     Buf b = {0};
     put_func(&b, sym_func(&c->syms, tree->name));
+    autosave(c, &b.s);
     return b.s;
+}
+
+/* Defines a function from a saved line; returns 1 if it worked. */
+static int define_line(Calc *c, const char *line)
+{
+    char err[256];
+    Node *tree = parse(line, err, sizeof err);
+    if (!tree)
+        return 0;
+    char *out = NULL;
+    if (tree->kind == NODE_DEFUN) {
+        char *store = c->store;   /* loading shouldn't rewrite the file line by line */
+        c->store = NULL;
+        out = define_function(c, tree, err, sizeof err);
+        c->store = store;
+    }
+    node_free(tree);
+    free(out);
+    return out != NULL;
 }
 
 char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
@@ -247,6 +471,7 @@ char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
         Buf b = {0};
         put_var(&b, c, tree->name, &v);
         out = b.s;
+        autosave(c, &out);
     } else {
         out = val_to_str(&v, c->digits, c->sci);
     }

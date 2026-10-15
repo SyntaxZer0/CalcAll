@@ -117,6 +117,7 @@ int main(int argc, char **argv)
 {
     Calc c;
     calc_init(&c);
+    calc_use_store(&c, calc_default_store());   /* bring back saved x = ..., f(x) = ... */
     int status = argc > 1 ? run_once(&c, argc, argv) : run_repl(&c);
     calc_free(&c);
     return status;

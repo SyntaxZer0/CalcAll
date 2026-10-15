@@ -17,10 +17,24 @@ typedef struct {
     Value ans;     /* the last result, available as `ans` */
     Symbols syms;  /* the user's variables and functions */
     int result_is_value;   /* the last calc_eval() gave a number (else a message) */
+    char *store;   /* file definitions are saved to, or NULL */
 } Calc;
 
 void calc_init(Calc *c);
 void calc_free(Calc *c);
+
+/*
+ * Where definitions are kept between runs: $CALC_DEFINITIONS if set (empty
+ * means don't save), else ~/.calc_definitions. NULL when there's nowhere.
+ */
+const char *calc_default_store(void);
+
+/*
+ * Loads the definitions in `path` (if it exists) and saves to it from now on,
+ * after every change. NULL turns saving off. Returns how many were loaded,
+ * or -1 if the file couldn't be read.
+ */
+int calc_use_store(Calc *c, const char *path);
 
 /*
  * Evaluates one line: an expression like "prod(k=1, 10, k)", a definition

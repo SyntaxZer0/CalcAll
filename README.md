@@ -94,7 +94,8 @@ Run it from the repository folder, or keep the `assets` folder next to
 | Variables | `x = 5`, `rate = 0.05`, `θ = pi/3`; `ans` (or `Ans`) is the previous result |
 | Functions | `f(x) = x^2 + 1`, `g(a, b) = sqrt(a^2 + b^2)`, then `f(3)`, `g(3, 4)` |
 | Implicit × | `2pi`, `3(4+1)`, `2sin(30)` multiply |
-| Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:vars`, `:clear [name]`, `:help`, `:quit` |
+| Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:help`, `:quit` |
+| Definitions | `:vars`, `:clear [name]`, `:save [file]`, `:load file` |
 
 Approximate results are computed with 10 more digits than are shown, so
 every digit you see is correct. `:digits 1000` gives π to 1000 places.
@@ -105,6 +106,13 @@ up each time it runs, so it uses the current values of your variables.
 Built-in names like `sin`, `pi` and `ans` can't be redefined. Letters next to
 each other multiply when there's no variable by that name, so with `x` and
 `y` defined, `xy` is `x*y`.
+
+Definitions are saved automatically to `~/.calc_definitions` after every
+change and loaded again at startup, in the terminal and the GUI alike. Values
+are stored as exact fractions, so `x = 1/3` comes back as exactly 1/3 and an
+approximate value keeps all its digits. Set `CALC_DEFINITIONS` to use another
+file, or to an empty value to turn saving off. `:save file` and `:load file`
+keep separate sets.
 
 Complex numbers work everywhere a real number does, and stay exact when
 they can: `(1+2i)(3-i)` = `5 + 5i`, `sqrt(-4)` = `2i`, `sqrt(3+4i)` = `2 + i`,

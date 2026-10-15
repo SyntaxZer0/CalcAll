@@ -1113,6 +1113,7 @@ int main(void)
     SetTargetFPS(60);
     font = load_font();
     calc_init(&calc);
+    calc_use_store(&calc, calc_default_store());   /* bring back saved definitions */
     ed_init(&ed);
     make_icons();
 

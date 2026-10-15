@@ -1,6 +1,9 @@
 #!/bin/sh
 # Usage: tests/run_tests.sh [path/to/calc]
 CALC=${1:-./calc}
+# Never read or write the real ~/.calc_definitions; the saving tests below
+# use a temporary file of their own.
+export CALC_DEFINITIONS=
 pass=0
 fail=0
 
@@ -177,6 +180,18 @@ session 11 '5 + 5' 'ans + 1'
 session '1.2676506002282294014...e+30' ':sci' '2^100'
 session '-1.25e-4' ':sci' '-1/8000'
 session '0.333...  (= 1/3)' ':digits 3' '1/3'
+
+# Saving: definitions come back in a new run, exact or approximate as before
+store=$(mktemp)
+printf '%s\n' 'x = 1/3' 'θ = pi/3' 'z = 3-4i' 'f(t) = t + x' | CALC_DEFINITIONS=$store "$CALC" >/dev/null
+report 'saved function' '1.33333333333333333333...  (= 4/3)' "$(CALC_DEFINITIONS=$store "$CALC" 'f(1)' 2>&1)"
+report 'saved approx' '≈ 1.0471975511965977462' "$(CALC_DEFINITIONS=$store "$CALC" 'θ' 2>&1)"
+report 'saved complex' '-7 - 24i' "$(CALC_DEFINITIONS=$store "$CALC" 'z^2' 2>&1)"
+CALC_DEFINITIONS=$store "$CALC" ':clear x' >/dev/null
+report 'saved clear' "error: unknown variable 'x'" "$(CALC_DEFINITIONS=$store "$CALC" 'x' 2>&1)"
+CALC_DEFINITIONS=$store "$CALC" ":save $store.copy" >/dev/null
+report 'load file' "loaded 3 definitions from $store.copy" "$("$CALC" ":load $store.copy" 2>&1)"
+rm -f "$store" "$store.copy"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
