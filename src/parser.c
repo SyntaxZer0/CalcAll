@@ -86,9 +86,13 @@ static void next(Parser *P)
             while (isdigit((unsigned char)*p))
                 p++;
         }
+    } else if (c >= 0x80) {
+        /* A symbol like π, Σ or Π is a name on its own, so "iπ" is i times π. */
+        t.kind = T_NAME;
+        p += c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
     } else if (is_name_char(c, 1)) {
         t.kind = T_NAME;
-        while (*p && is_name_char((unsigned char)*p, 0))
+        while (*p && (unsigned char)*p < 0x80 && is_name_char((unsigned char)*p, 0))
             p++;
     } else {
         t.kind = T_OP;

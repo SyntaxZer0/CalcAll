@@ -108,16 +108,42 @@ check '(1+2)(3+4)' 21
 check '2pi' '≈ 6.2831853071795864769'
 session 15 '5' '3Ans'
 
+# Complex numbers: exact where possible
+check 'i^2' -1
+check '(1+2i)(3-i)' '5 + 5i'
+check '1/(1+i)' '0.5 - 0.5i'
+check 'sqrt(-4)' 2i
+check 'sqrt(3+4i)' '2 + i'
+check '(-4)^(1/2)' 2i
+check '(-8)^(1/3)' -2
+check '(1+i)^10' 32i
+check 'abs(3+4i)' 5
+check 'conj(2-3i)' '2 + 3i'
+check 're(2-3i)' 2
+check 'im(2-3i)' -3
+check 'sum(k=0, 3, i^k)' 0
+check 'sqrt(-2)' '≈ 1.4142135623730950488i'
+check 'e^(i*pi)' '≈ -1'
+check 'exp(i*pi/2)' '≈ i'
+check 'ln(-1)' '≈ 3.1415926535897932385i'
+check 'i^i' '≈ 0.20787957635076190855'
+check 'asin(2)' '≈ 1.5707963267948966192 - 1.3169578969248167086i'
+check 'arg(1+i)' '≈ 0.78539816339744830962'
+session 45 ':deg' 'arg(1+i)'
+session 90 ':deg' 'arg(i)'
+check 'e^(iπ)' '≈ -1'
+check 'ie' '≈ 2.7182818284590452354i'
+check 'sum(k=1, 4, ki)' 10i
+check 'floor(i)' 'error: floor needs real numbers'
+check 'i!' 'error: factorial argument must be a real number'
+
 # Errors
 check '1/0' 'error: division by zero'
 check '(1 + 2' "error: expected ')' but the input ended (at column 7)"
 check 'x + 1' "error: unknown variable 'x'"
 check 'foo(1)' "error: unknown function 'foo'"
 check '(-1)!' 'error: factorial of a negative number is undefined'
-check 'sqrt(-4)' 'error: square root of a negative number is not a real number'
-check 'ln(0)' 'error: log of zero or a negative number is undefined'
-check 'asin(2)' 'error: asin needs a value from -1 to 1'
-check '(-8)^(1/2)' 'error: a negative number to this power is not a real number'
+check 'ln(0)' 'error: log of zero is undefined'
 check '9^9^9' 'error: result would have about 369693100 digits (limit is 1000000)'
 
 # REPL features

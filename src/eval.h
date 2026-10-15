@@ -7,12 +7,14 @@
 #include "rational.h"
 
 /*
- * A computed value. Exact values are true fractions. Approximate values
- * (anything that went through sqrt(2), pi, sin, ...) are fractions rounded
- * to the working precision, and are shown with a "≈".
+ * A computed value: r + im*i, where im is 0 for a real number. Exact values
+ * are true fractions. Approximate values (anything that went through
+ * sqrt(2), pi, sin, ...) are fractions rounded to the working precision, and
+ * are shown with a "≈".
  */
 typedef struct {
-    Rational r;
+    Rational r;    /* real part */
+    Rational im;   /* imaginary part */
     int exact;
 } Value;
 
@@ -20,6 +22,10 @@ void val_init(Value *v);   /* exact 0 */
 void val_free(Value *v);
 void val_copy(Value *dst, const Value *src);
 void val_swap(Value *a, Value *b);
+
+/* Formats a value for display, like rat_to_str() but with "3 + 4i" for
+ * complex numbers (malloc'd). */
+char *val_to_str(const Value *v, int digits, int sci);
 
 /*
  * A chain of variable bindings. sum() and prod() push a binding for their

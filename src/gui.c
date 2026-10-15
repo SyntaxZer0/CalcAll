@@ -466,7 +466,7 @@ static char *result_text(int *is_fraction)
     if (e->message)
         return dup(e->message);
     const Rational *r = &e->val.r;
-    if (e->val.exact && !rat_is_int(r) && show_fraction && !calc.sci &&
+    if (e->val.exact && rat_is_zero(&e->val.im) && !rat_is_int(r) && show_fraction && !calc.sci &&
         bi_num_digits(&r->num) + bi_num_digits(&r->den) <= 40) {
         *is_fraction = 1;
         char *n = bi_to_str(&r->num), *d = bi_to_str(&r->den);
@@ -476,7 +476,7 @@ static char *result_text(int *is_fraction)
         free(d);
         return s;
     }
-    char *s = rat_to_str(r, calc.digits, calc.sci, e->val.exact);
+    char *s = val_to_str(&e->val, calc.digits, calc.sci);
     char *note = strstr(s, "  (=");   /* "0.333...  (= 1/3)": S<=>D shows the fraction */
     if (note)
         *note = '\0';
@@ -695,7 +695,7 @@ static void draw_screen(Rectangle area)
 
 /* ---- Buttons ------------------------------------------------------------------- */
 
-enum { A_TEXT, A_TEMPLATE, A_SQUARE, A_POW, A_EXP, A_EVAL, A_DEL, A_AC };
+enum { A_TEXT, A_TEMPLATE, A_SQUARE, A_INVERSE, A_POW, A_EXP, A_EVAL, A_DEL, A_AC };
 enum { K_NUM, K_OP, K_FN, K_CTRL, K_ACCENT };
 
 typedef struct {
@@ -727,6 +727,9 @@ static const Button FN_BUTTONS[] = {
 
     TXT("\xCF\x80", "\xCF\x80", K_FN), TXT("e", "e", K_FN), TXT("k", "k", K_FN), TXT("n!", "!", K_FN),
     TXT("(", "(", K_FN), TXT(")", ")", K_FN),
+
+    TXT("i", "i", K_FN), TXT("Re", "re(", K_FN), TXT("Im", "im(", K_FN), TXT("conj", "conj(", K_FN),
+    TXT("arg", "arg(", K_FN), {"x\xE2\x81\xBB\xC2\xB9", -1, A_INVERSE, NULL, IT_CHAR, K_FN},
 };
 
 static const Button NUM_BUTTONS[] = {
@@ -839,6 +842,10 @@ static void press(const Button *b)
     case A_SQUARE:
         begin_edit(1);
         ed_insert_pow(&ed, "2");
+        break;
+    case A_INVERSE:   /* x^-1 */
+        begin_edit(1);
+        ed_insert_pow(&ed, "-1");
         break;
     case A_POW:
         begin_edit(1);
@@ -1117,7 +1124,7 @@ int main(void)
         Rectangle screen = {PAD, PAD, W - 2 * PAD, H - keys_h - MODEBAR_H - 3 * PAD};
         Rectangle modebar = {PAD, screen.y + screen.height + PAD, W - 2 * PAD, MODEBAR_H};
         float gy = modebar.y + MODEBAR_H + PAD;
-        float fn_h = (H - gy - PAD) * 0.47f;
+        float fn_h = (H - gy - PAD) * 0.53f;   /* 5 rows of functions over 4 of numbers */
         Rectangle fn_area = {PAD, gy, W - 2 * PAD, fn_h};
         Rectangle num_area = {PAD, gy + fn_h + PAD, W - 2 * PAD, H - gy - fn_h - 2 * PAD};
 

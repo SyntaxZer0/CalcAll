@@ -21,6 +21,7 @@ static const char HELP[] =
     "Roots:      sqrt(x)  cbrt(x)  root(x, n)  x^(1/n)\n"
     "Logs:       ln(x)  log(x) (base 10)  log2(x)  log(x, base)  exp(x)\n"
     "Trig:       sin cos tan asin acos atan sinh cosh tanh\n"
+    "Complex:    i  3+4i  re im conj arg abs  (sqrt(-4) = 2i)\n"
     "Other:      abs floor ceil round gcd lcm choose(n,k) perm(n,k)\n"
     "Variables:  ans or Ans  (the previous result)\n"
     "Implicit:   2pi  3(4+1)  2sin(30)  mean 2*pi, 3*(4+1), 2*sin(30)\n"
@@ -115,5 +116,5 @@ char *calc_eval(Calc *c, const char *line, char *err, size_t errlen)
     }
     val_swap(&c->ans, &v);
     val_free(&v);
-    return rat_to_str(&c->ans.r, c->digits, c->sci, c->ans.exact);
+    return val_to_str(&c->ans, c->digits, c->sci);
 }

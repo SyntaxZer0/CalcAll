@@ -87,6 +87,7 @@ Run it from the repository folder, or keep the `assets` folder next to
 | Roots | `sqrt(x)`, `cbrt(x)`, `root(x, n)`, `x^(p/q)` |
 | Logs | `ln(x)`, `log(x)` (base 10), `log2(x)`, `log(x, base)`, `exp(x)` |
 | Trig | `sin cos tan asin acos atan sinh cosh tanh` |
+| Complex | `i`, `3+4i`, `re im conj arg abs` |
 | Sum | `sum(k=1, 100, k^2)` or `Σ(k=1, 100, k^2)` |
 | Product | `prod(k=1, 10, k)` or `Π(k=1, 10, k)` |
 | Other | `abs floor ceil round gcd lcm choose(n,k) perm(n,k)` |
@@ -97,12 +98,20 @@ Run it from the repository folder, or keep the `assets` folder next to
 Approximate results are computed with 10 more digits than are shown, so
 every digit you see is correct. `:digits 1000` gives π to 1000 places.
 
+Complex numbers work everywhere a real number does, and stay exact when
+they can: `(1+2i)(3-i)` = `5 + 5i`, `sqrt(-4)` = `2i`, `sqrt(3+4i)` = `2 + i`,
+`abs(3+4i)` = `5`, while `e^(iπ)` gives `≈ -1` and `asin(2)` gives
+`≈ 1.5707963267948966192 - 1.3169578969248167086i`. Functions use their
+principal values, like most calculators; odd roots of negative numbers stay
+real, so `cbrt(-8)` and `(-8)^(1/3)` are `-2`.
+
 ## How it's built
 
 ```
 src/bigint.c    arbitrary-precision integers (add, multiply, long division)
 src/rational.c  exact fractions on top of bigint, plus number formatting
 src/approx.c    sqrt, pi, exp, ln, sin, cos, atan via series in fixed point
+src/cmath.c     complex arithmetic and complex exp, ln, sqrt, sin, cos, ...
 src/parser.c    text -> expression tree (recursive descent)
 src/eval.c      walks the tree; tracks exact vs approximate; all functions
 src/calc.c      the engine API a front end calls: calc_eval(line) -> text

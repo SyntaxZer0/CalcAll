@@ -1,11 +1,14 @@
 #include "eval.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "approx.h"
+#include "cmath.h"
 
 /* Safety limits so a typo like 9^9^9 fails fast instead of freezing. */
 #define MAX_RESULT_DIGITS 1000000
@@ -26,23 +29,27 @@ typedef struct {
 void val_init(Value *v)
 {
     rat_init(&v->r);
+    rat_init(&v->im);
     v->exact = 1;
 }
 
 void val_free(Value *v)
 {
     rat_free(&v->r);
+    rat_free(&v->im);
 }
 
 void val_copy(Value *dst, const Value *src)
 {
     rat_copy(&dst->r, &src->r);
+    rat_copy(&dst->im, &src->im);
     dst->exact = src->exact;
 }
 
 void val_swap(Value *a, Value *b)
 {
     rat_swap(&a->r, &b->r);
+    rat_swap(&a->im, &b->im);
     int t = a->exact;
     a->exact = b->exact;
     b->exact = t;
@@ -60,14 +67,43 @@ static int fail(Ctx *c, const char *fmt, ...)
 static void set_int(Value *v, int64_t n)
 {
     rat_set_i64(&v->r, n);
+    rat_set_i64(&v->im, 0);
     v->exact = 1;
+}
+
+static int is_real(const Value *v)
+{
+    return rat_is_zero(&v->im);
+}
+
+static void get_cx(Complex *z, const Value *v)
+{
+    rat_copy(&z->re, &v->r);
+    rat_copy(&z->im, &v->im);
+}
+
+/* Moves z into v (z is left holding v's old parts, to be freed). */
+static void put_cx(Value *v, Complex *z, int exact)
+{
+    rat_swap(&v->r, &z->re);
+    rat_swap(&v->im, &z->im);
+    v->exact = exact;
 }
 
 /* Marks v as approximate and rounds it to the working precision. */
 static void approx(Value *v, Ctx *c)
 {
     v->exact = 0;
-    rat_round_sig(&v->r, &v->r, c->prec);
+    if (is_real(v)) {
+        rat_round_sig(&v->r, &v->r, c->prec);
+        return;
+    }
+    Complex z;
+    cx_init(&z);
+    put_cx(v, &z, 0);   /* swap the parts out, round them, swap them back */
+    cx_round(&z, c->prec);
+    put_cx(v, &z, 0);
+    cx_free(&z);
 }
 
 /*
@@ -93,6 +129,8 @@ static int is_one(const Rational *r)
 
 static int need_int(const Value *v, const char *what, int64_t *out, Ctx *c)
 {
+    if (!is_real(v))
+        return fail(c, "%s must be a real number", what);
     if (!rat_is_int(&v->r))
         return fail(c, "%s must be a whole number", what);
     if (rat_to_i64(&v->r, out))
@@ -102,7 +140,7 @@ static int need_int(const Value *v, const char *what, int64_t *out, Ctx *c)
 
 static int check_size(const Value *v, Ctx *c)
 {
-    if (rat_size_log10(&v->r) > MAX_RESULT_DIGITS)
+    if (rat_size_log10(&v->r) > MAX_RESULT_DIGITS || rat_size_log10(&v->im) > MAX_RESULT_DIGITS)
         return fail(c, "result has more than %d digits", MAX_RESULT_DIGITS);
     return 0;
 }
@@ -113,6 +151,10 @@ static int too_big(Ctx *c, double digits)
 }
 
 static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c);
+static int complex_power(Value *out, const Value *a, const Value *b, Ctx *c);
+static int complex_root(Value *out, const Value *x, int64_t n, Ctx *c);
+static int complex_log(Value *out, const Value *x, const Value *base, Ctx *c);
+static int complex_func(Value *out, const Value *x, int f, Ctx *c);
 
 /* ---- Powers and roots ---------------------------------------------------- */
 
@@ -224,6 +266,8 @@ static int power(Value *out, const Value *a, const Value *b, Ctx *c)
     int exact = a->exact && b->exact;
     int64_t n;
 
+    if (!is_real(a) || !is_real(b))
+        return complex_power(out, a, b, c);
     if (rat_is_int(&b->r)) {
         if (rat_to_i64(&b->r, &n))
             return fail(c, "exponent is too large");
@@ -241,11 +285,10 @@ static int power(Value *out, const Value *a, const Value *b, Ctx *c)
 
     int negate = 0;
     if (rat_sign(&a->r) < 0) {
-        /* Only odd roots of negative numbers are real: (-8)^(1/3) = -2. */
-        if (!b->exact)
-            return fail(c, "a negative number to a non-exact power is not supported");
-        if (!is_odd(&b->r.den))
-            return fail(c, "a negative number to this power is not a real number");
+        /* Odd roots of negative numbers stay real, (-8)^(1/3) = -2, as on a
+         * Casio; anything else is complex: (-4)^(1/2) = 2i. */
+        if (!b->exact || !is_odd(&b->r.den))
+            return complex_power(out, a, b, c);
         negate = is_odd(&b->r.num);
     }
 
@@ -261,9 +304,11 @@ static int power(Value *out, const Value *a, const Value *b, Ctx *c)
     int64_t p, q;
     if (exact && bi_to_i64(&b->r.den, &q) == 0 && bi_to_i64(&b->r.num, &p) == 0 &&
         exact_root(&root, &base, q)) {
-        Value rv = {root, 1};
+        Value rv;
+        val_init(&rv);
+        rat_swap(&rv.r, &root);
         rc = int_power(out, &rv, p, 1, c);
-        root = rv.r;
+        val_free(&rv);
     } else {
         rc = pow_approx(out, &base, &b->r, c);
     }
@@ -279,9 +324,8 @@ static int fn_sqrt_root(Value *out, const Value *x, int64_t n, Ctx *c)
     if (n < 1)
         return fail(c, "root degree must be at least 1");
     int neg = rat_sign(&x->r) < 0;
-    if (neg && n % 2 == 0)
-        return fail(c, "%s of a negative number is not a real number",
-                    n == 2 ? "square root" : "even root");
+    if (!is_real(x) || (neg && n % 2 == 0))
+        return complex_root(out, x, n, c);   /* sqrt(-4) = 2i */
     if (n == 1 || rat_is_zero(&x->r)) {
         val_copy(out, x);
         return 0;
@@ -307,6 +351,21 @@ static int fn_sqrt_root(Value *out, const Value *x, int64_t n, Ctx *c)
 
 static int fn_exp(Value *out, const Value *x, Ctx *c)
 {
+    if (!is_real(x)) {
+        double digits = rat_to_double(&x->r) * LOG10_E;
+        if (fabs(digits) > MAX_RESULT_DIGITS)
+            return too_big(c, fabs(digits));
+        Complex z, r;
+        cx_init(&z);
+        cx_init(&r);
+        get_cx(&z, x);
+        cx_exp(&r, &z, c->prec);
+        put_cx(out, &r, 0);
+        approx(out, c);
+        cx_free(&z);
+        cx_free(&r);
+        return 0;
+    }
     if (x->exact && rat_is_zero(&x->r)) {
         set_int(out, 1);
         return 0;
@@ -340,10 +399,12 @@ static int exact_log(int64_t *n, const Rational *x, const Rational *b)
 /* Logarithm of x in the given base; natural log when base is NULL. */
 static int fn_log(Value *out, const Value *x, const Value *base, Ctx *c)
 {
-    if (rat_sign(&x->r) <= 0)
-        return fail(c, "log of zero or a negative number is undefined");
-    if (base && (rat_sign(&base->r) <= 0 || is_one(&base->r)))
-        return fail(c, "log base must be positive and not 1");
+    if (is_real(x) && rat_is_zero(&x->r))
+        return fail(c, "log of zero is undefined");
+    if (base && is_real(base) && (rat_is_zero(&base->r) || is_one(&base->r)))
+        return fail(c, "log base can't be 0 or 1");
+    if (!is_real(x) || rat_sign(&x->r) < 0 || (base && (!is_real(base) || rat_sign(&base->r) < 0)))
+        return complex_log(out, x, base, c);   /* ln(-1) = pi*i */
     if (x->exact && is_one(&x->r)) {
         set_int(out, 0);
         return 0;
@@ -444,6 +505,8 @@ static void from_radians(Rational *r, const Rational *x, Ctx *c)
 
 static int fn_trig(Value *out, const Value *x, int f, Ctx *c)
 {
+    if (!is_real(x))
+        return complex_func(out, x, f, c);
     Rational a, s, co;
     rat_init(&a);
     rat_init(&s);
@@ -515,8 +578,8 @@ done:
 static int fn_inverse_trig(Value *out, const Value *x, int f, Ctx *c)
 {
     const Rational *v = &x->r;
-    if (f != F_ATAN && bi_cmp_abs(&v->num, &v->den) > 0)
-        return fail(c, "%s needs a value from -1 to 1", f == F_ASIN ? "asin" : "acos");
+    if (!is_real(x) || (f != F_ATAN && bi_cmp_abs(&v->num, &v->den) > 0))
+        return complex_func(out, x, f, c);   /* asin(2) is complex */
 
     /* Exact answers for 0, +-1/2 and +-1 (in degrees; only 0 in radians). */
     int64_t n, d;
@@ -596,6 +659,8 @@ static int fn_inverse_trig(Value *out, const Value *x, int f, Ctx *c)
 
 static int fn_hyperbolic(Value *out, const Value *x, int f, Ctx *c)
 {
+    if (!is_real(x))
+        return complex_func(out, x, f, c);
     if (x->exact && rat_is_zero(&x->r)) {
         set_int(out, f == F_COSH ? 1 : 0);
         return 0;
@@ -637,6 +702,443 @@ static int fn_hyperbolic(Value *out, const Value *x, int f, Ctx *c)
     rat_free(&inv);
     rat_free(&t);
     return 0;
+}
+
+/* ---- Complex numbers ------------------------------------------------------ */
+
+/* If z has an exact square root, like 3+4i -> 2+i or -4 -> 2i, store it. */
+static int exact_csqrt(Complex *r, const Complex *z)
+{
+    /* sqrt(a + bi) = sqrt((m + a)/2) + sign(b) sqrt((m - a)/2) i, m = |z| */
+    Rational n, m, t, re, im, two;
+    rat_init(&n);
+    rat_init(&m);
+    rat_init(&t);
+    rat_init(&re);
+    rat_init(&im);
+    rat_init(&two);
+    rat_set_i64(&two, 2);
+    cx_norm(&n, z);
+    int ok = exact_root(&m, &n, 2);
+    if (ok) {
+        rat_add(&t, &m, &z->re);
+        rat_div(&t, &t, &two);
+        ok = exact_root(&re, &t, 2);
+    }
+    if (ok) {
+        rat_sub(&t, &m, &z->re);
+        rat_div(&t, &t, &two);
+        ok = exact_root(&im, &t, 2);
+    }
+    if (ok) {
+        if (rat_sign(&z->im) < 0)
+            rat_neg(&im);
+        rat_swap(&r->re, &re);
+        rat_swap(&r->im, &im);
+    }
+    rat_free(&n);
+    rat_free(&m);
+    rat_free(&t);
+    rat_free(&re);
+    rat_free(&im);
+    rat_free(&two);
+    return ok;
+}
+
+/* z * k for a real k */
+static void cx_scale(Complex *z, const Rational *k)
+{
+    rat_mul(&z->re, &z->re, k);
+    rat_mul(&z->im, &z->im, k);
+}
+
+static int complex_root(Value *out, const Value *x, int64_t n, Ctx *c)
+{
+    Complex z, r;
+    cx_init(&z);
+    cx_init(&r);
+    get_cx(&z, x);
+    if (n == 2 && x->exact && exact_csqrt(&r, &z)) {
+        put_cx(out, &r, 1);
+    } else if (n == 2) {
+        cx_sqrt(&r, &z, c->prec);
+        put_cx(out, &r, 0);
+        approx(out, c);
+    } else {
+        /* principal root: e^(ln(z) / n) */
+        Rational k;
+        rat_init(&k);
+        rat_set_i64(&k, n);
+        cx_ln(&r, &z, c->prec + EXTRA);
+        rat_div(&r.re, &r.re, &k);
+        rat_div(&r.im, &r.im, &k);
+        cx_exp(&r, &r, c->prec);
+        put_cx(out, &r, 0);
+        approx(out, c);
+        rat_free(&k);
+    }
+    cx_free(&z);
+    cx_free(&r);
+    return 0;
+}
+
+static int complex_power(Value *out, const Value *a, const Value *b, Ctx *c)
+{
+    int exact = a->exact && b->exact;
+    int rc = 0;
+    int64_t n, d;
+    Complex z, w, r;
+    cx_init(&z);
+    cx_init(&w);
+    cx_init(&r);
+    get_cx(&z, a);
+    get_cx(&w, b);
+
+    if (is_real(b) && rat_is_int(&b->r)) {
+        if (rat_to_i64(&b->r, &n)) {
+            rc = fail(c, "exponent is too large");
+            goto done;
+        }
+        if (cx_is_zero(&z)) {
+            rc = n < 0 ? fail(c, "division by zero (0 to a negative power)") : 0;
+            set_int(out, n == 0 ? 1 : 0);
+            out->exact = exact;
+            goto done;
+        }
+        double sr = rat_size_log10(&z.re), si = rat_size_log10(&z.im);
+        double digits = fabs((double)n) * (sr > si ? sr : si);
+        if (exact && digits > MAX_RESULT_DIGITS) {
+            rc = too_big(c, digits);
+            goto done;
+        }
+        if (exact || digits <= 20000) {
+            cx_pow_int(&r, &z, n);   /* (1+i)^2 = 2i, exactly */
+            put_cx(out, &r, exact);
+            if (!exact)
+                approx(out, c);
+            goto done;
+        }
+        /* a huge power of an approximate number: use e^(n ln z) below */
+    } else if (cx_is_zero(&z)) {
+        if (is_real(b) && rat_sign(&b->r) > 0)
+            set_int(out, 0);
+        else
+            rc = fail(c, "0 to this power is undefined");
+        out->exact = exact;
+        goto done;
+    } else if (is_real(a) && rat_sign(&a->r) < 0 && is_real(b) && b->exact &&
+               bi_to_i64(&b->r.den, &d) == 0 && d == 2) {
+        /* (-x)^(p/2) = x^(p/2) * i^p, exact when sqrt(x) is: (-4)^(1/2) = 2i */
+        Value pos, t;
+        val_init(&pos);
+        val_init(&t);
+        rat_copy(&pos.r, &a->r);
+        rat_neg(&pos.r);
+        pos.exact = a->exact;
+        rc = power(&t, &pos, b, c);
+        if (rc == 0) {
+            BigInt four, q;
+            int64_t p4;
+            bi_init(&four);
+            bi_init(&q);
+            bi_set_i64(&four, 4);
+            bi_divmod(NULL, &q, &b->r.num, &four);
+            bi_to_i64(&q, &p4);
+            p4 = ((p4 % 4) + 4) % 4;   /* i^p cycles 1, i, -1, -i */
+            set_int(out, 0);
+            rat_swap(p4 % 2 ? &out->im : &out->r, &t.r);
+            if (p4 >= 2) {
+                rat_neg(&out->r);
+                rat_neg(&out->im);
+            }
+            out->exact = t.exact;
+            bi_free(&four);
+            bi_free(&q);
+        }
+        val_free(&pos);
+        val_free(&t);
+        goto done;
+    }
+
+    {
+        /* z^w = e^(w ln z). Re(w ln z) = Re(w) ln|z| - Im(w) arg z sizes the result. */
+        double lz = rat_log10_abs(&z.re) > rat_log10_abs(&z.im) ? rat_log10_abs(&z.re)
+                                                                 : rat_log10_abs(&z.im);
+        double size = fabs(rat_to_double(&w.re)) * fabs(lz) + fabs(rat_to_double(&w.im)) * 1.4;
+        if (size > MAX_RESULT_DIGITS) {
+            rc = too_big(c, size);
+            goto done;
+        }
+        double ln_size = size / LOG10_E;
+        int p2 = c->prec + EXTRA + (ln_size > 1 ? (int)ceil(log10(ln_size)) : 0);
+        cx_ln(&r, &z, p2);
+        cx_mul(&r, &w, &r);
+        cx_round(&r, p2);
+        cx_exp(&r, &r, c->prec);
+        put_cx(out, &r, 0);
+        approx(out, c);
+    }
+
+done:
+    cx_free(&z);
+    cx_free(&w);
+    cx_free(&r);
+    return rc;
+}
+
+/* Logarithm in the given base (natural when NULL) of anything but 0. */
+static int complex_log(Value *out, const Value *x, const Value *base, Ctx *c)
+{
+    int p2 = c->prec + EXTRA;
+    Complex z, l, lb;
+    cx_init(&z);
+    cx_init(&l);
+    cx_init(&lb);
+    get_cx(&z, x);
+    cx_ln(&l, &z, p2);
+    if (base) {
+        get_cx(&z, base);
+        cx_ln(&lb, &z, p2);
+        cx_div(&l, &l, &lb);
+    }
+    put_cx(out, &l, 0);
+    approx(out, c);
+    cx_free(&z);
+    cx_free(&l);
+    cx_free(&lb);
+    return 0;
+}
+
+/* pi/180 for converting degrees, or its inverse. */
+static void degree_factor(Rational *k, int to_radians, int prec)
+{
+    Rational t;
+    rat_init(&t);
+    ap_pi(k, prec);
+    rat_set_i64(&t, 180);
+    if (to_radians)
+        rat_div(k, k, &t);
+    else
+        rat_div(k, &t, k);
+    rat_free(&t);
+}
+
+/* sin cos tan, their inverses, and sinh cosh tanh of complex numbers (and of
+ * real numbers outside asin/acos's -1..1). */
+static int complex_func(Value *out, const Value *x, int f, Ctx *c)
+{
+    int p2 = c->prec + EXTRA, rc = 0;
+    Complex z, r, s, t;
+    Rational k;
+    cx_init(&z);
+    cx_init(&r);
+    cx_init(&s);
+    cx_init(&t);
+    rat_init(&k);
+    get_cx(&z, x);
+    if (c->degrees && f <= F_TAN) {
+        degree_factor(&k, 1, p2);
+        cx_scale(&z, &k);
+    }
+
+    switch (f) {
+    case F_SIN:
+        cx_sin(&r, &z, p2);
+        break;
+    case F_COS:
+        cx_cos(&r, &z, p2);
+        break;
+    case F_SINH:
+        cx_sinh(&r, &z, p2);
+        break;
+    case F_COSH:
+        cx_cosh(&r, &z, p2);
+        break;
+    case F_TAN:
+    case F_TANH:
+        if (f == F_TAN) {
+            cx_sin(&s, &z, p2);
+            cx_cos(&t, &z, p2);
+        } else {
+            cx_sinh(&s, &z, p2);
+            cx_cosh(&t, &z, p2);
+        }
+        if (cx_div(&r, &s, &t))
+            rc = fail(c, "%s is undefined here", f == F_TAN ? "tan" : "tanh");
+        break;
+    case F_ASIN:
+    case F_ACOS:
+        /* asin z = -i ln(iz + sqrt(1 - z^2)) */
+        cx_mul(&s, &z, &z);
+        rat_set_i64(&t.re, 1);
+        rat_set_i64(&t.im, 0);
+        cx_sub(&s, &t, &s);
+        cx_sqrt(&s, &s, p2 + EXTRA);
+        rat_set_i64(&t.re, 0);
+        rat_set_i64(&t.im, 1);
+        cx_mul(&t, &t, &z);
+        cx_add(&s, &s, &t);
+        cx_ln(&s, &s, p2);
+        rat_set_i64(&t.re, 0);
+        rat_set_i64(&t.im, -1);
+        cx_mul(&r, &t, &s);
+        if (f == F_ACOS) {
+            /* acos z = pi/2 - asin z */
+            Rational half_pi;
+            rat_init(&half_pi);
+            ap_pi(&half_pi, p2);
+            rat_set_i64(&k, 2);
+            rat_div(&half_pi, &half_pi, &k);
+            rat_sub(&r.re, &half_pi, &r.re);
+            rat_neg(&r.im);
+            rat_free(&half_pi);
+        }
+        break;
+    case F_ATAN:
+        /* atan z = (i/2) ln((i + z) / (i - z)), undefined at +-i */
+        rat_set_i64(&t.re, 0);
+        rat_set_i64(&t.im, 1);
+        cx_add(&s, &t, &z);
+        cx_sub(&t, &t, &z);
+        if (cx_is_zero(&s) || cx_is_zero(&t)) {
+            rc = fail(c, "atan is undefined at i and -i");
+            break;
+        }
+        cx_div(&s, &s, &t);
+        cx_ln(&s, &s, p2);
+        rat_set_i64(&t.re, 0);
+        rat_set_i64(&t.im, 1);
+        rat_set_i64(&k, 2);
+        rat_div(&t.im, &t.im, &k);
+        cx_mul(&r, &t, &s);
+        break;
+    }
+
+    if (rc == 0) {
+        if (c->degrees && f >= F_ASIN && f <= F_ATAN) {
+            degree_factor(&k, 0, p2);
+            cx_scale(&r, &k);
+        }
+        put_cx(out, &r, 0);
+        approx(out, c);
+    }
+    cx_free(&z);
+    cx_free(&r);
+    cx_free(&s);
+    cx_free(&t);
+    rat_free(&k);
+    return rc;
+}
+
+/* abs (the magnitude) and arg (the angle) of any number. */
+static int fn_abs_arg(Value *out, const Value *x, int want_arg, Ctx *c)
+{
+    Complex z;
+    cx_init(&z);
+    get_cx(&z, x);
+    if (!want_arg) {
+        if (is_real(x)) {
+            val_copy(out, x);
+            if (rat_sign(&out->r) < 0)
+                rat_neg(&out->r);
+        } else {
+            /* |3+4i| = 5 exactly; otherwise sqrt(a^2 + b^2) */
+            Rational n;
+            rat_init(&n);
+            cx_norm(&n, &z);
+            set_int(out, 0);
+            if (x->exact && exact_root(&out->r, &n, 2)) {
+                out->exact = 1;
+            } else {
+                ap_sqrt(&out->r, &n, c->prec);
+                out->exact = 0;
+            }
+            rat_free(&n);
+        }
+        cx_free(&z);
+        return 0;
+    }
+
+    if (cx_is_zero(&z)) {
+        cx_free(&z);
+        return fail(c, "arg of 0 is undefined");
+    }
+    /* Exact angles: positive reals are 0; in degrees, the axes are too. */
+    int sr = rat_sign(&z.re), si = rat_sign(&z.im);
+    int64_t deg = -1;
+    if (si == 0 && sr > 0)
+        deg = 0;
+    else if (si == 0)
+        deg = 180;
+    else if (sr == 0)
+        deg = si > 0 ? 90 : -90;
+    else if (bi_cmp_abs(&z.re.num, &z.im.num) == 0 && bi_cmp(&z.re.den, &z.im.den) == 0)
+        deg = sr > 0 ? (si > 0 ? 45 : -45) : (si > 0 ? 135 : -135);   /* the diagonals */
+    if (x->exact && (deg == 0 || (c->degrees && deg != -1))) {
+        set_int(out, deg);
+    } else {
+        set_int(out, 0);
+        cx_arg(&out->r, &z, c->prec + EXTRA);
+        from_radians(&out->r, &out->r, c);
+        approx(out, c);
+    }
+    cx_free(&z);
+    return 0;
+}
+
+/* +, -, *, /, ^ when either side is complex */
+static int complex_binary(Value *out, char op, const Value *a, const Value *b, Ctx *c)
+{
+    int exact = a->exact && b->exact, rc = 0;
+    Complex x, y, r;
+    cx_init(&x);
+    cx_init(&y);
+    cx_init(&r);
+    get_cx(&x, a);
+    get_cx(&y, b);
+    switch (op) {
+    case '+':
+        cx_add(&r, &x, &y);
+        break;
+    case '-':
+        cx_sub(&r, &x, &y);
+        break;
+    case '*':
+        cx_mul(&r, &x, &y);
+        break;
+    case '/':
+        if (cx_div(&r, &x, &y))
+            rc = fail(c, "division by zero");
+        break;
+    case '%':
+        rc = fail(c, "mod needs real numbers");
+        break;
+    case '^':
+        rc = complex_power(out, a, b, c);
+        goto done;
+    }
+    if (rc == 0) {
+        if (!exact && (op == '+' || op == '-')) {
+            /* Parts that cancel down to rounding noise are 0: i*i + 1 */
+            double ref = -HUGE_VAL;
+            const Rational *parts[] = {&x.re, &x.im, &y.re, &y.im};
+            for (int i = 0; i < 4; i++)
+                if (rat_log10_abs(parts[i]) > ref)
+                    ref = rat_log10_abs(parts[i]);
+            if (rat_log10_abs(&r.re) < ref - (c->prec - 3))
+                rat_set_i64(&r.re, 0);
+            if (rat_log10_abs(&r.im) < ref - (c->prec - 3))
+                rat_set_i64(&r.im, 0);
+        }
+        put_cx(out, &r, exact);
+        if (!exact)
+            approx(out, c);
+    }
+done:
+    cx_free(&x);
+    cx_free(&y);
+    cx_free(&r);
+    return rc;
 }
 
 /* ---- Whole-number functions ---------------------------------------------- */
@@ -780,6 +1282,8 @@ static void fn_round(Value *out, const Value *x, int mode)
 
 static int binary(Value *out, char op, const Value *a, const Value *b, Ctx *c)
 {
+    if (!is_real(a) || !is_real(b))
+        return complex_binary(out, op, a, b, c) || check_size(out, c);
     int exact = a->exact && b->exact;
     int a_zero = a->exact && rat_is_zero(&a->r), b_zero = b->exact && rat_is_zero(&b->r);
 
@@ -861,10 +1365,25 @@ static int big_op(const Node *n, const Binding *env, Value *out, Ctx *c)
         Binding bind = {n->name, &idx, env};
         if (eval_node(n->args[2], &bind, &term, c))
             goto done;
-        if (is_sum)
-            rat_add(&acc.r, &acc.r, &term.r);
-        else
-            rat_mul(&acc.r, &acc.r, &term.r);
+        if (is_real(&acc) && is_real(&term)) {
+            if (is_sum)
+                rat_add(&acc.r, &acc.r, &term.r);
+            else
+                rat_mul(&acc.r, &acc.r, &term.r);
+        } else {
+            Complex x, y;
+            cx_init(&x);
+            cx_init(&y);
+            get_cx(&x, &acc);
+            get_cx(&y, &term);
+            if (is_sum)
+                cx_add(&x, &x, &y);
+            else
+                cx_mul(&x, &x, &y);
+            put_cx(&acc, &x, acc.exact);
+            cx_free(&x);
+            cx_free(&y);
+        }
         acc.exact = acc.exact && term.exact;
         if (!acc.exact)
             approx(&acc, c);
@@ -956,13 +1475,27 @@ static int call(const Node *n, Value *args, Value *out, Ctx *c)
     }
 
     /* Rounding */
-    if (IS("abs")) {
+    if (IS("abs") || IS("arg")) {
+        ARITY(1);
+        return fn_abs_arg(out, &args[0], IS("arg"), c);
+    }
+
+    /* Complex numbers */
+    if (IS("re") || IS("im") || IS("conj")) {
         ARITY(1);
         val_copy(out, &args[0]);
-        if (rat_sign(&out->r) < 0)
-            rat_neg(&out->r);
+        if (IS("re"))
+            rat_set_i64(&out->im, 0);
+        else if (IS("im"))
+            rat_swap(&out->r, &out->im), rat_set_i64(&out->im, 0);
+        else
+            rat_neg(&out->im);
         return 0;
     }
+    for (size_t i = 0; i < argc; i++)
+        if (!is_real(&args[i]) && (IS("floor") || IS("ceil") || IS("round") || IS("gcd") || IS("lcm")))
+            return fail(c, "%s needs real numbers", name);
+
     if (IS("floor") || IS("ceil") || IS("round")) {
         ARITY(1);
         fn_round(out, &args[0], IS("floor") ? -1 : IS("ceil") ? 1 : 0);
@@ -989,6 +1522,12 @@ static int call(const Node *n, Value *args, Value *out, Ctx *c)
 
 static int constant(const char *name, Value *out, Ctx *c)
 {
+    rat_set_i64(&out->im, 0);
+    if (strcmp(name, "i") == 0) {   /* the imaginary unit */
+        set_int(out, 0);
+        rat_set_i64(&out->im, 1);
+        return 1;
+    }
     if (strcmp(name, "pi") == 0 || strcmp(name, "\xCF\x80") == 0) {   /* π */
         ap_pi(&out->r, c->prec);
         out->exact = 0;
@@ -1006,8 +1545,46 @@ static int constant(const char *name, Value *out, Ctx *c)
     return 0;
 }
 
+static int lookup(const char *name, const Binding *env, Value *out, Ctx *c)
+{
+    for (const Binding *b = env; b; b = b->next) {
+        if (strcmp(b->name, name) == 0) {
+            val_copy(out, b->value);
+            return 1;
+        }
+    }
+    return constant(name, out, c);
+}
+
+/*
+ * An unknown name made of single-letter variables and constants multiplies
+ * them, as typed on a calculator: "ki" in a sum is k*i.
+ */
+static int split_name(const char *name, const Binding *env, Value *out, Ctx *c)
+{
+    size_t len = strlen(name);
+    int ok = len > 1;
+    for (size_t i = 0; i < len && ok; i++)
+        ok = isalpha((unsigned char)name[i]);
+    Value acc, v;
+    val_init(&acc);
+    val_init(&v);
+    set_int(&acc, 1);
+    for (size_t i = 0; i < len && ok; i++) {
+        char letter[2] = {name[i], '\0'};
+        ok = lookup(letter, env, &v, c) && binary(&acc, '*', &acc, &v, c) == 0;
+    }
+    if (ok)
+        val_swap(out, &acc);
+    val_free(&acc);
+    val_free(&v);
+    return ok ? 0 : fail(c, "unknown variable '%s'", name);
+}
+
 static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
 {
+    /* Real results only set out->r; start with no imaginary part. */
+    rat_set_i64(&out->im, 0);
     switch (n->kind) {
     case NODE_NUM:
         rat_copy(&out->r, &n->value);
@@ -1023,12 +1600,13 @@ static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
         }
         if (constant(n->name, out, c))
             return 0;
-        return fail(c, "unknown variable '%s'", n->name);
+        return split_name(n->name, env, out, c);
 
     case NODE_NEG:
         if (eval_node(n->args[0], env, out, c))
             return -1;
         rat_neg(&out->r);
+        rat_neg(&out->im);
         return 0;
 
     case NODE_FACT: {
@@ -1081,4 +1659,50 @@ int eval(const Node *n, const Binding *env, const EvalOptions *opt, Value *out, 
 {
     Ctx c = {err, errlen, opt->prec, opt->degrees};
     return eval_node(n, env, out, &c);
+}
+
+/* One part of a complex number, without the "≈ " or "  (= 1/3)" decorations. */
+static char *part_str(const Rational *r, int digits, int sci, int exact)
+{
+    char *s = rat_to_str(r, digits, sci, exact);
+    if (!s)
+        exit(1);
+    char *note = strstr(s, "  (=");
+    if (note)
+        *note = '\0';
+    if (strncmp(s, "\xE2\x89\x88 ", 4) == 0)
+        memmove(s, s + 4, strlen(s + 4) + 1);
+    return s;
+}
+
+char *val_to_str(const Value *v, int digits, int sci)
+{
+    if (is_real(v))
+        return rat_to_str(&v->r, digits, sci, v->exact);
+
+    /* "≈ 3 + 4i", "-2.5i", "1 - i" */
+    Rational im;
+    rat_init(&im);
+    rat_copy(&im, &v->im);
+    int neg = rat_sign(&im) < 0;
+    if (neg)
+        rat_neg(&im);
+    char *re = rat_is_zero(&v->r) ? NULL : part_str(&v->r, digits, sci, v->exact);
+    char *ims = part_str(&im, digits, sci, v->exact);
+    if (strcmp(ims, "1") == 0) {   /* "i", not "1i" */
+        free(ims);
+        ims = NULL;
+    }
+    rat_free(&im);
+
+    size_t len = (re ? strlen(re) : 0) + (ims ? strlen(ims) : 0) + 16;
+    char *out = malloc(len);
+    if (!out)
+        exit(1);
+    snprintf(out, len, "%s%s%s%s%si", v->exact ? "" : "\xE2\x89\x88 ", re ? re : "",
+             re ? (neg ? " - " : " + ") : (neg ? "-" : ""), ims ? ims : "",
+             ims && sci && strchr(ims, 'e') ? " " : "");
+    free(re);
+    free(ims);
+    return out;
 }
