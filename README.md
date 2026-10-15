@@ -45,7 +45,7 @@ make test       # run the tests
 The GUI uses [raylib](https://www.raylib.com). On macOS:
 
 ```sh
-brew install raylib pkg-config
+brew install raylib
 make gui
 ./calc-gui
 ```

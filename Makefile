@@ -8,20 +8,28 @@ HDR = $(wildcard src/*.h)
 calc: $(ENGINE) src/main.c $(HDR)
 	$(CC) $(CFLAGS) -o $@ $(ENGINE) src/main.c $(LDLIBS)
 
-# The GUI needs raylib. macOS: brew install raylib pkg-config
-# Elsewhere, point these at your raylib build if pkg-config can't find it:
+# The GUI needs raylib. macOS: brew install raylib
+# raylib is found with pkg-config, or in Homebrew's folders on macOS. If it's
+# somewhere else, say where:
 #   make gui RAYLIB_CFLAGS=-I/path/raylib/src RAYLIB_LIBS=/path/raylib/src/libraylib.a
-RAYLIB_CFLAGS ?= $(shell pkg-config --cflags raylib 2>/dev/null)
-RAYLIB_LIBS ?= $(shell pkg-config --libs raylib 2>/dev/null || echo -lraylib)
 ifeq ($(shell uname -s),Darwin)
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
 GUI_SYSLIBS = -framework Cocoa -framework IOKit -framework OpenGL -framework CoreVideo
 else
 GUI_SYSLIBS = -lGL -lpthread -ldl -lrt -lX11
 endif
+RAYLIB_CFLAGS ?= $(shell pkg-config --cflags raylib 2>/dev/null || \
+                   echo $(if $(BREW_PREFIX),-I$(BREW_PREFIX)/include))
+RAYLIB_LIBS ?= $(shell pkg-config --libs raylib 2>/dev/null || \
+                 echo $(if $(BREW_PREFIX),-L$(BREW_PREFIX)/lib) -lraylib)
 
 gui: calc-gui
 
 calc-gui: $(ENGINE) src/mathedit.c src/gui.c $(HDR)
+	@printf '#include "raylib.h"\n' | $(CC) $(RAYLIB_CFLAGS) -E -x c - >/dev/null 2>&1 || { \
+	    echo "raylib not found. Install it (macOS: brew install raylib), or see the"; \
+	    echo "comment above RAYLIB_CFLAGS in the Makefile to point at your copy."; \
+	    exit 1; }
 	$(CC) $(CFLAGS) $(RAYLIB_CFLAGS) -o $@ $(ENGINE) src/mathedit.c src/gui.c $(RAYLIB_LIBS) $(GUI_SYSLIBS) $(LDLIBS)
 
 test: calc tests/mathedit_test
