@@ -79,6 +79,20 @@ static int any_hover;
 
 static Row *icons[8];         /* little expressions drawn on template buttons */
 
+/* Table mode, like a Casio's TABLE: f(x), g(x), Start, End, Step -> rows */
+enum { TAB_CALC, TAB_TABLE };
+enum { FIELD_F, FIELD_G, FIELD_START, FIELD_END, FIELD_STEP, NFIELDS };
+static int tab = TAB_CALC;
+static Editor fields[NFIELDS];
+static float field_scroll[NFIELDS];
+static int focus;                  /* field being edited in the table setup */
+static int table_view;             /* showing the table instead of its setup */
+static Table table;
+static int sel_row, sel_col;       /* selected cell; col 0 is x, 1 is f, 2 is g */
+static int table_top;              /* first row on screen */
+static char table_error[300];
+static Editor *cur = &ed;          /* the editor that keys and buttons type into */
+
 /* ---- Text helpers ------------------------------------------------------------ */
 
 static float tw(const char *s, float size)
@@ -432,6 +446,10 @@ static void replay(int dir)
  */
 static void begin_edit(int continues)
 {
+    if (cur != &ed) {   /* a table field */
+        table_error[0] = '\0';
+        return;
+    }
     if (shown >= 0) {
         ed_clear(&ed);
         if (continues)
@@ -444,6 +462,10 @@ static void begin_edit(int continues)
 /* Like begin_edit, but keeps the expression to edit it (arrows, delete). */
 static void resume_edit(void)
 {
+    if (cur != &ed) {
+        table_error[0] = '\0';
+        return;
+    }
     shown = -1;
     error_text[0] = '\0';
 }
@@ -451,7 +473,7 @@ static void resume_edit(void)
 static void type_text(const char *s)
 {
     begin_edit(strchr("+-*/^!%", s[0]) != NULL);
-    ed_insert_text(&ed, s);
+    ed_insert_text(cur, s);
 }
 
 /* ---- Results ---------------------------------------------------------------- */
@@ -628,8 +650,14 @@ static void draw_fraction_result(const char *s, Rectangle area)
     }
 }
 
+static void copy_cell(void);
+
 static void copy_result(void)
 {
+    if (tab == TAB_TABLE && table_view) {
+        copy_cell();
+        return;
+    }
     int frac;
     char *s = result_text(&frac);
     if (s) {
@@ -829,6 +857,8 @@ static int icon_button(Rectangle r, const Row *icon, Color color)
     return clicked;
 }
 
+static void table_enter(void);
+
 static void press(const Button *b)
 {
     switch (b->action) {
@@ -837,34 +867,37 @@ static void press(const Button *b)
         break;
     case A_TEMPLATE:
         begin_edit(0);
-        ed_insert_template(&ed, b->kind, 0);
+        ed_insert_template(cur, b->kind, 0);
         break;
     case A_SQUARE:
         begin_edit(1);
-        ed_insert_pow(&ed, "2");
+        ed_insert_pow(cur, "2");
         break;
     case A_INVERSE:   /* x^-1 */
         begin_edit(1);
-        ed_insert_pow(&ed, "-1");
+        ed_insert_pow(cur, "-1");
         break;
     case A_POW:
         begin_edit(1);
-        ed_insert_pow(&ed, NULL);
+        ed_insert_pow(cur, NULL);
         break;
     case A_EXP:
         begin_edit(0);
-        ed_insert_text(&ed, "e");
-        ed_insert_pow(&ed, NULL);
+        ed_insert_text(cur, "e");
+        ed_insert_pow(cur, NULL);
         break;
     case A_EVAL:
-        evaluate();
+        if (tab == TAB_TABLE)
+            table_enter();
+        else
+            evaluate();
         break;
     case A_DEL:
         resume_edit();
-        ed_backspace(&ed);
+        ed_backspace(cur);
         break;
     case A_AC:
-        ed_clear(&ed);
+        ed_clear(cur);
         resume_edit();
         break;
     }
@@ -936,58 +969,79 @@ static void draw_modebar(Rectangle area)
 
 /* ---- Keyboard ------------------------------------------------------------------- */
 
+static void table_key(int key);
+static void set_focus(int f);
+
 static void handle_key(int key)
 {
+    if (tab == TAB_TABLE && table_view) {
+        table_key(key);
+        return;
+    }
+    int in_table = tab == TAB_TABLE;
+    int showing = !in_table && shown >= 0;   /* a calculator result is on screen */
     switch (key) {
     case KEY_ENTER:
     case KEY_KP_ENTER:
-        evaluate();
+        if (in_table)
+            table_enter();
+        else
+            evaluate();
         break;
     case KEY_BACKSPACE:
     case KEY_DELETE:
         resume_edit();
-        ed_backspace(&ed);
+        ed_backspace(cur);
         break;
     case KEY_LEFT:
-        if (shown >= 0)
-            ed_end(&ed);
+        if (showing)
+            ed_end(cur);
         else
-            ed_left(&ed);
+            ed_left(cur);
         resume_edit();
         break;
     case KEY_RIGHT:
-        if (shown >= 0)
-            ed_home(&ed);
+        if (showing)
+            ed_home(cur);
         else
-            ed_right(&ed);
+            ed_right(cur);
         resume_edit();
         break;
     case KEY_HOME:
-        ed_home(&ed);
+        ed_home(cur);
         resume_edit();
         break;
     case KEY_END:
-        ed_end(&ed);
+        ed_end(cur);
         resume_edit();
         break;
     case KEY_UP:
     case KEY_DOWN: {
         int dir = key == KEY_UP ? -1 : 1;
-        /* Inside a fraction or sum, move between its boxes; otherwise replay. */
-        if (shown >= 0 || !ed_vertical(&ed, dir)) {
-            if (shown >= 0 || ed_is_empty(&ed))
+        /* Inside a fraction or sum, move between its boxes; otherwise replay
+         * earlier calculations, or move between the table's fields. */
+        if (showing || !ed_vertical(cur, dir)) {
+            if (in_table)
+                set_focus(focus + dir);
+            else if (showing || ed_is_empty(cur))
                 replay(dir);
         }
         break;
     }
-    case KEY_TAB:
-        if (shown >= 0)
-            ed_home(&ed);
-        ed_tab(&ed, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ? -1 : 1);
+    case KEY_TAB: {
+        int dir = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ? -1 : 1;
+        if (showing)
+            ed_home(cur);
+        Row *row = cur->row;
+        int pos = cur->pos;
+        ed_tab(cur, dir);
+        if (in_table && cur->row == row && cur->pos == pos)
+            set_focus(focus + dir);   /* no more boxes here: next field */
         resume_edit();
         break;
+    }
     case KEY_ESCAPE:
-        ed_clear(&ed);
+        ed_clear(cur);
         resume_edit();
         break;
     }
@@ -997,7 +1051,7 @@ static void handle_key(int key)
 static void type_char_text(const char *utf8)
 {
     begin_edit(utf8[1] == '\0' && strchr("+-*/^!%", utf8[0]) != NULL);
-    ed_type(&ed, utf8);
+    ed_type(cur, utf8);
 }
 
 static void handle_keys(void)
@@ -1007,7 +1061,7 @@ static void handle_keys(void)
 
     int cp;
     while ((cp = GetCharPressed()) > 0) {
-        if (mod || cp == ' ')
+        if (mod || cp == ' ' || (tab == TAB_TABLE && table_view))
             continue;
         if (text_mode) {
             int n;
@@ -1018,10 +1072,10 @@ static void handle_keys(void)
             type_char_text(utf8);
         } else if (cp == '/') {   /* "12/" makes a fraction with 12 on top */
             begin_edit(1);
-            ed_insert_template(&ed, IT_FRAC, 1);
+            ed_insert_template(cur, IT_FRAC, 1);
         } else if (cp == '^') {
             begin_edit(1);
-            ed_insert_pow(&ed, NULL);
+            ed_insert_pow(cur, NULL);
         } else {
             int n;
             char utf8[8];
@@ -1034,7 +1088,7 @@ static void handle_keys(void)
 
     if (mod && IsKeyPressed(KEY_C))
         copy_result();
-    if (mod && IsKeyPressed(KEY_V)) {
+    if (mod && IsKeyPressed(KEY_V) && !(tab == TAB_TABLE && table_view)) {
         const char *clip = GetClipboardText();
         if (clip && *clip) {
             char buf[2048];
@@ -1066,10 +1120,353 @@ static void handle_keys(void)
     int key;
     while ((key = GetKeyPressed()) != 0)
         handle_key(key);
-    const int repeating[] = {KEY_BACKSPACE, KEY_DELETE, KEY_LEFT, KEY_RIGHT};
+    const int repeating[] = {KEY_BACKSPACE, KEY_DELETE, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN};
     for (size_t i = 0; i < sizeof repeating / sizeof *repeating; i++)
         if (IsKeyPressedRepeat(repeating[i]))
             handle_key(repeating[i]);
+}
+
+/* ---- Table mode -------------------------------------------------------------------- */
+
+static void set_focus(int f)
+{
+    focus = f < 0 ? 0 : f >= NFIELDS ? NFIELDS - 1 : f;
+    cur = &fields[focus];
+}
+
+static void set_tab(int t)
+{
+    tab = t;
+    cur = tab == TAB_TABLE ? &fields[focus] : &ed;
+}
+
+/* Cell text cache: formatting thousands of values every frame would be slow. */
+static char **cells;
+static int cells_width = -1, cells_digits, cells_sci;
+
+static void clear_cells(void)
+{
+    if (cells)
+        for (int i = 0; i < table.count * 3; i++)
+            free(cells[i]);
+    free(cells);
+    cells = NULL;
+    cells_width = -1;
+}
+
+static const Value *cell_value(int row, int col, const char **error)
+{
+    TableRow *r = &table.rows[row];
+    *error = col == 1 ? r->f_error : col == 2 ? r->g_error : NULL;
+    return col == 0 ? &r->x : col == 1 ? &r->f : &r->g;
+}
+
+static const char *cell_text(int row, int col, int width)
+{
+    if (width != cells_width || calc.digits != cells_digits || calc.sci != cells_sci) {
+        clear_cells();
+        cells = calloc((size_t)table.count * 3, sizeof *cells);
+        if (!cells)
+            exit(1);
+        cells_width = width;
+        cells_digits = calc.digits;
+        cells_sci = calc.sci;
+    }
+    char **slot = &cells[row * 3 + col];
+    if (!*slot) {
+        const char *error;
+        const Value *v = cell_value(row, col, &error);
+        *slot = error ? dup("ERROR") : calc_cell(&calc, v, width);
+    }
+    return *slot;
+}
+
+static void build_table(void)
+{
+    char *text[NFIELDS];
+    int any_empty = 0;
+    for (int i = 0; i < NFIELDS; i++) {
+        int empty;
+        text[i] = ed_serialize(fields[i].root, &empty);
+        any_empty |= empty;
+    }
+    char err[256];
+    if (any_empty) {
+        snprintf(table_error, sizeof table_error, "Fill in the empty box first");
+    } else if (!text[FIELD_F][0]) {
+        snprintf(table_error, sizeof table_error, "Enter f(x) first");
+        set_focus(FIELD_F);
+    } else {
+        clear_cells();
+        table_free(&table);
+        if (calc_table(&calc, text[FIELD_F], text[FIELD_G], text[FIELD_START], text[FIELD_END],
+                       text[FIELD_STEP], &table, err, sizeof err)) {
+            snprintf(table_error, sizeof table_error, "%s", err);
+        } else {
+            table_error[0] = '\0';
+            table_view = 1;
+            sel_row = 0;
+            sel_col = 1;
+            table_top = 0;
+        }
+    }
+    for (int i = 0; i < NFIELDS; i++)
+        free(text[i]);
+}
+
+/* Enter in the setup: on to the next field, and from Step, show the table. */
+static void table_enter(void)
+{
+    if (focus < FIELD_STEP)
+        set_focus(focus + 1);
+    else
+        build_table();
+}
+
+static void table_key(int key)
+{
+    int cols = table.has_g ? 3 : 2;
+    switch (key) {
+    case KEY_UP:
+        sel_row--;
+        break;
+    case KEY_DOWN:
+        sel_row++;
+        break;
+    case KEY_PAGE_UP:
+        sel_row -= 10;
+        break;
+    case KEY_PAGE_DOWN:
+        sel_row += 10;
+        break;
+    case KEY_HOME:
+        sel_row = 0;
+        break;
+    case KEY_END:
+        sel_row = table.count - 1;
+        break;
+    case KEY_LEFT:
+        sel_col--;
+        break;
+    case KEY_RIGHT:
+    case KEY_TAB:
+        sel_col++;
+        break;
+    case KEY_ESCAPE:
+    case KEY_BACKSPACE:
+    case KEY_ENTER:
+    case KEY_KP_ENTER:
+        table_view = 0;   /* back to the setup */
+        return;
+    }
+    sel_row = sel_row < 0 ? 0 : sel_row >= table.count ? table.count - 1 : sel_row;
+    sel_col = sel_col < 0 ? 0 : sel_col >= cols ? cols - 1 : sel_col;
+}
+
+/* "x", "f(1.5)" or "g(1.5)": what the selected cell is */
+static void cell_label(char *buf, size_t n, int row, int col)
+{
+    if (col == 0)
+        snprintf(buf, n, "x");
+    else
+        snprintf(buf, n, "%s(%s)", col == 1 ? "f" : "g", cell_text(row, 0, 12));
+}
+
+static void copy_cell(void)
+{
+    if (table.count == 0)
+        return;
+    const char *error;
+    const Value *v = cell_value(sel_row, sel_col, &error);
+    if (error)
+        return;
+    char *s = val_to_str(v, calc.digits, calc.sci);
+    SetClipboardText(strncmp(s, "\xE2\x89\x88 ", 4) == 0 ? s + 4 : s);
+    free(s);
+}
+
+static void draw_tabs(Rectangle area)
+{
+    const char *names[] = {"Calculate", "Table"};
+    float w = (area.width - GAP) / 2;
+    for (int i = 0; i < 2; i++) {
+        Rectangle r = {area.x + (float)i * (w + GAP), area.y, w, area.height};
+        int active = tab == i;
+        if (button_frame(r, active ? COL_SCREEN : COL_BG) && !active)
+            set_tab(i);
+        if (active)
+            DrawRectangleRec((Rectangle){r.x + 10, r.y + r.height - 3, r.width - 20, 3}, COL_ACCENT);
+        Vector2 t = MeasureTextEx(font, names[i], 16, 0);
+        DrawTextEx(font, names[i], (Vector2){r.x + (w - t.x) / 2, r.y + (r.height - t.y) / 2 - 1}, 16, 0,
+                   active ? COL_TEXT : COL_MUTED);
+    }
+}
+
+/* One input field of the setup, drawn in `r`; clicking it gives it focus. */
+static void draw_field(int f, Rectangle r, float size)
+{
+    int focused = focus == f;
+    if (CheckCollisionPointRec(GetMousePosition(), r)) {
+        any_hover = 1;
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            set_focus(f);
+            table_error[0] = '\0';
+        }
+    }
+    DrawRectangleRounded(r, 0.2f, 6, ColorBrightness(COL_SCREEN, -0.25f));
+    if (focused)
+        DrawRectangleRoundedLinesEx(r, 0.2f, 6, 1.5f, COL_CURSOR);
+
+    Box b = measure(fields[f].root, size);
+    float base = r.y + (r.height - (b.asc + b.desc)) / 2 + b.asc;
+    float x = r.x + 8;
+    caret_ed = focused ? &fields[f] : NULL;
+    caret_found = 0;
+    BeginScissorMode((int)r.x + 2, (int)r.y, (int)r.width - 4, (int)r.height);
+    layout_row(fields[f].root, size, 1, x - field_scroll[f], base, COL_TEXT);
+    if (f == FIELD_G && ed_is_empty(&fields[f]) && !focused)
+        DrawTextEx(font, "optional", (Vector2){x, r.y + (r.height - 14) / 2}, 14, 0, COL_MUTED);
+    if (caret_found && ((int)(GetTime() * 2.5)) % 2 == 0)
+        DrawRectangleRec(caret, COL_CURSOR);
+    EndScissorMode();
+    caret_ed = NULL;
+
+    /* Scroll sideways to keep the cursor in view. */
+    float room = r.width - 16;
+    if (caret_found) {
+        float cx = caret.x + field_scroll[f] - x;
+        if (cx - field_scroll[f] > room)
+            field_scroll[f] = cx - room;
+        if (cx - field_scroll[f] < 0)
+            field_scroll[f] = cx;
+    }
+    if (b.w <= room)
+        field_scroll[f] = 0;
+}
+
+static void draw_table_setup(Rectangle area)
+{
+    DrawRectangleRounded(area, 0.05f, 8, COL_SCREEN);
+    char status[64];
+    snprintf(status, sizeof status, "TABLE  %s  %d digits", calc.degrees ? "DEG" : "RAD", calc.digits);
+    DrawTextEx(font, status, (Vector2){area.x + PAD, area.y + 6}, 13, 0, COL_MUTED);
+
+    float x = area.x + PAD, w = area.width - 2 * PAD, y = area.y + 24;
+    const char *labels[] = {"f(x)=", "g(x)="};
+    for (int f = FIELD_F; f <= FIELD_G; f++) {
+        float lw = tw(labels[f], 22) + 6;
+        Box b = measure(fields[f].root, 26);
+        float h = maxf(34, b.asc + b.desc + 10);
+        text_at(labels[f], x, y + h / 2 + 8, 22, COL_TEXT);
+        draw_field(f, (Rectangle){x + lw, y, w - lw, h}, 26);
+        y += h + 6;
+    }
+
+    /* Start, End, Step, and the button that builds the table, side by side */
+    const char *names[] = {"Start", "End", "Step"};
+    float cw = (w - 3 * GAP) / 3.9f, fh = 0;
+    for (int f = FIELD_START; f <= FIELD_STEP; f++) {
+        Box b = measure(fields[f].root, 20);
+        fh = maxf(fh, maxf(28, b.asc + b.desc + 8));
+    }
+    for (int i = 0; i < 3; i++) {
+        float cx = x + (float)i * (cw + GAP);
+        DrawTextEx(font, names[i], (Vector2){cx + 2, y}, 13, 0, COL_MUTED);
+        draw_field(FIELD_START + i, (Rectangle){cx, y + 15, cw, fh}, 20);
+    }
+    float bx = x + 3 * (cw + GAP);
+    if (text_button((Rectangle){bx, y + 15, x + w - bx, fh}, "Table", COL_ACCENT, 16))
+        build_table();
+    y += 15 + fh + 6;
+
+    Rectangle msg = {x, y, w, area.y + area.height - 6 - y};
+    if (table_error[0])
+        draw_message(table_error, msg, COL_ERROR);
+    else if (msg.height >= 16)
+        DrawTextEx(font, "Enter: next field \xC2\xB7 Enter on Step shows the table", (Vector2){x, y + 2}, 13, 0,
+                   COL_MUTED);
+}
+
+static void draw_table_view(Rectangle area)
+{
+    DrawRectangleRounded(area, 0.03f, 8, COL_SCREEN);
+    int cols = table.has_g ? 3 : 2;
+    const float size = 18, row_h = 26, detail_h = 74;
+    float x = area.x + PAD, w = area.width - 2 * PAD;
+    float colw = w / (float)cols;
+    int chars = (int)((colw - 14) / tw("0", size));
+    if (chars < 4)
+        chars = 4;
+
+    const char *heads[] = {"x", "f(x)", "g(x)"};
+    float y = area.y + 8;
+    for (int c = 0; c < cols; c++) {
+        Vector2 t = MeasureTextEx(font, heads[c], 16, 0);
+        DrawTextEx(font, heads[c], (Vector2){x + (float)(c + 1) * colw - t.x - 8, y + 4}, 16, 0, COL_MUTED);
+    }
+    y += row_h;
+    DrawRectangleRec((Rectangle){x, y - 2, w, 1}, COL_BOX);
+
+    Rectangle list = {x, y, w, area.y + area.height - detail_h - y};
+    int visible = (int)(list.height / row_h);
+    if (visible < 1)
+        visible = 1;
+    if (CheckCollisionPointRec(GetMousePosition(), list))
+        table_top -= (int)GetMouseWheelMove() * 3;
+    if (sel_row < table_top)   /* keep the selection on screen when it moves */
+        table_top = sel_row;
+    if (sel_row >= table_top + visible)
+        table_top = sel_row - visible + 1;
+    if (table_top > table.count - visible)
+        table_top = table.count - visible;
+    if (table_top < 0)
+        table_top = 0;
+
+    BeginScissorMode((int)list.x, (int)list.y, (int)list.width, (int)list.height);
+    for (int i = 0; i < visible && table_top + i < table.count; i++) {
+        int row = table_top + i;
+        float ry = list.y + (float)i * row_h;
+        if (row % 2)
+            DrawRectangleRec((Rectangle){x, ry, w, row_h}, ColorBrightness(COL_SCREEN, 0.04f));
+        if (row == sel_row)
+            DrawRectangleRec((Rectangle){x, ry, w, row_h}, ColorBrightness(COL_SCREEN, 0.1f));
+        for (int c = 0; c < cols; c++) {
+            Rectangle cell = {x + (float)c * colw, ry, colw, row_h};
+            if (CheckCollisionPointRec(GetMousePosition(), cell)) {
+                any_hover = 1;
+                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                    sel_row = row;
+                    sel_col = c;
+                }
+            }
+            if (row == sel_row && c == sel_col)
+                DrawRectangleLinesEx(cell, 1.5f, COL_CURSOR);
+            const char *text = cell_text(row, c, chars);
+            Vector2 t = MeasureTextEx(font, text, size, 0);
+            Color color = strcmp(text, "ERROR") == 0 ? COL_ERROR : c == 0 ? COL_MUTED : COL_TEXT;
+            DrawTextEx(font, text, (Vector2){cell.x + colw - t.x - 8, ry + (row_h - t.y) / 2}, size, 0, color);
+        }
+    }
+    EndScissorMode();
+
+    /* The selected cell in full, like the bottom line of a Casio's table. */
+    float dy = area.y + area.height - detail_h;
+    DrawRectangleRec((Rectangle){x, dy, w, 1}, COL_BOX);
+    char label[64];
+    cell_label(label, sizeof label, sel_row, sel_col);
+    char head[96];
+    snprintf(head, sizeof head, "%s  \xC2\xB7  row %d of %d", label, sel_row + 1, table.count);
+    DrawTextEx(font, head, (Vector2){x, dy + 6}, 14, 0, COL_MUTED);
+    Rectangle detail = {x, dy + 22, w, detail_h - 28};
+    const char *error;
+    const Value *v = cell_value(sel_row, sel_col, &error);
+    if (error) {
+        draw_message(error, detail, COL_ERROR);
+    } else {
+        char *s = val_to_str(v, calc.digits, calc.sci);
+        draw_text_result(s, detail, COL_TEXT);
+        free(s);
+    }
 }
 
 /* ---- Main ------------------------------------------------------------------------ */
@@ -1082,7 +1479,7 @@ static Font load_font(void)
         "abcdefghijklmnopqrstuvwxyz{|}~"
         "\xE2\x89\x88\xCF\x80\xCE\xA3\xCE\xA0\xE2\x88\x91\xE2\x88\x8F\xE2\x88\x9A"
         "\xC3\xB7\xC3\x97\xE2\x88\x92\xE2\x8C\xAB\xCA\xB8\xE2\x80\xA6\xE2\x81\xBB\xC2\xB9"
-        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7";
+        "\xE2\x87\x94\xE2\x86\x92\xC2\xB7\xE2\x86\x90\xE2\x86\x91\xE2\x86\x93";
     int count;
     int *cps = LoadCodepoints(chars, &count);
 
@@ -1115,14 +1512,23 @@ int main(void)
     calc_init(&calc);
     calc_use_store(&calc, calc_default_store());   /* bring back saved definitions */
     ed_init(&ed);
+    for (int i = 0; i < NFIELDS; i++)
+        ed_init(&fields[i]);
+    ed_insert_text(&fields[FIELD_START], "1");   /* Casio's defaults */
+    ed_insert_text(&fields[FIELD_END], "5");
+    ed_insert_text(&fields[FIELD_STEP], "1");
     make_icons();
 
     while (!WindowShouldClose()) {
         handle_keys();
 
         float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
-        float keys_h = text_mode ? 40 : H * 0.6f;   /* text mode: room for a hint, no buttons */
-        Rectangle screen = {PAD, PAD, W - 2 * PAD, H - keys_h - MODEBAR_H - 3 * PAD};
+        int in_view = tab == TAB_TABLE && table_view;
+        int no_keys = text_mode || in_view;   /* typing only: room for a hint, no buttons */
+        float keys_h = no_keys ? 40 : H * 0.6f;
+        Rectangle tabs = {PAD, PAD - 4, W - 2 * PAD, 30};
+        float top = tabs.y + tabs.height + 6;
+        Rectangle screen = {PAD, top, W - 2 * PAD, H - keys_h - MODEBAR_H - 2 * PAD - top};
         Rectangle modebar = {PAD, screen.y + screen.height + PAD, W - 2 * PAD, MODEBAR_H};
         float gy = modebar.y + MODEBAR_H + PAD;
         float fn_h = (H - gy - PAD) * 0.53f;   /* 5 rows of functions over 4 of numbers */
@@ -1132,13 +1538,24 @@ int main(void)
         any_hover = 0;
         BeginDrawing();
         ClearBackground(COL_BG);
-        draw_screen(screen);
+        draw_tabs(tabs);
+        if (tab == TAB_CALC)
+            draw_screen(screen);
+        else if (table_view)
+            draw_table_view(screen);
+        else
+            draw_table_setup(screen);
         draw_modebar(modebar);
-        if (text_mode) {
-            const char *hint[] = {
+        if (no_keys) {
+            const char *text_hint[] = {
                 "sum prod sqrt root cbrt abs exp frac pi \xE2\x86\x92 templates",
                 "Tab or , next box \xC2\xB7 ) leave \xC2\xB7 / fraction \xC2\xB7 ^ power",
             };
+            const char *table_hint[] = {
+                "\xE2\x86\x91\xE2\x86\x93 \xE2\x86\x90\xE2\x86\x92 move \xC2\xB7 wheel scrolls \xC2\xB7 click a cell",
+                "Esc or Enter: back to the setup \xC2\xB7 Copy: the selected cell",
+            };
+            const char **hint = in_view ? table_hint : text_hint;
             for (int i = 0; i < 2; i++)
                 DrawTextEx(font, hint[i], (Vector2){PAD + 4, gy - 2 + (float)i * 17}, 13, 0, COL_MUTED);
         } else {
@@ -1154,6 +1571,10 @@ int main(void)
     for (size_t i = 0; i < sizeof icons / sizeof *icons; i++)
         row_free(icons[i]);
     ed_free(&ed);
+    for (int i = 0; i < NFIELDS; i++)
+        ed_free(&fields[i]);
+    clear_cells();
+    table_free(&table);
     calc_free(&calc);
     if (font.texture.id != GetFontDefault().texture.id)
         UnloadFont(font);

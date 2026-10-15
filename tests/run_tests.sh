@@ -169,6 +169,15 @@ session 'error: f takes 1 argument' 'f(x) = x' 'f(1, 2)'
 session "error: unknown variable 'y'" 'y = 2' ':clear y' 'y'
 session 'removed 2 definitions' 'x = 1' 'f(x) = x' ':clear'
 
+# Tables
+check ':table x^2 + 1 from 1 to 3' "$(printf 'x                       f(x)\n1                       2\n2                       5\n3                       10')"
+report 'table 0.1 steps' '1                       1' "$("$CALC" ':table x from 0 to 1 step 0.1' | tail -n 1)"
+report 'table error cell' '0                       ERROR                   0' "$("$CALC" ':table 1/x; sqrt(x) from -1 to 1 step 0.5' | sed -n 4p)"
+report 'table uses variables' '2                       20' "$(printf '%s\n' 'a = 10' ':table a x from 1 to 2' | "$CALC" | tail -n 1)"
+check ':table x from 1 to 5000' 'error: that'"'"'s more than 1000 rows; use a bigger Step'
+check ':table x from 5 to 1' "error: End can't be reached from Start with this Step"
+check ':table x from 1 to 5 step 0' "error: Step can't be 0"
+
 # REPL features
 session 0.5 ':deg' 'sin(30)'
 session 1 ':deg' 'tan(45)'

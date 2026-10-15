@@ -74,6 +74,15 @@ variable) moves to the next box and `)` leaves it, so typing or pasting
 `2^10-1` follow normal precedence, ending the fraction or power at the
 operator.
 
+The **Table** tab works like a Casio's TABLE mode: enter f(x) and, if you
+like, g(x), then Start, End and Step (expressions such as `pi/4` are fine),
+and press Enter on Step or the Table button. Tables can have up to 1000 rows;
+x goes up exactly, so a step of 0.1 never drifts. Arrow keys or clicks select
+a cell, and its full-precision value shows at the bottom (Copy copies it).
+Cells that can't be computed, like 1/x at 0, show ERROR. In the terminal,
+`:table x^2 + 1 from 1 to 5 step 1` prints the same thing (add `; g(x)` after
+f(x) for a second column).
+
 Run it from the repository folder, or keep the `assets` folder next to
 `calc-gui`, so it can find its font.
 
@@ -96,6 +105,7 @@ Run it from the repository folder, or keep the `assets` folder next to
 | Implicit × | `2pi`, `3(4+1)`, `2sin(30)` multiply |
 | Commands | `:deg`, `:rad`, `:sci`, `:fix`, `:digits N`, `:help`, `:quit` |
 | Definitions | `:vars`, `:clear [name]`, `:save [file]`, `:load file` |
+| Tables | `:table x^2 + 1 from 1 to 5 step 1`, `:table sin(x); cos(x) from 0 to pi step pi/4` |
 
 Approximate results are computed with 10 more digits than are shown, so
 every digit you see is correct. `:digits 1000` gives π to 1000 places.

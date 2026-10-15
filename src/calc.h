@@ -43,4 +43,32 @@ int calc_use_store(Calc *c, const char *path);
  */
 char *calc_eval(Calc *c, const char *line, char *err, size_t errlen);
 
+/* ---- Tables, like a Casio's TABLE mode ---------------------------------------- */
+
+#define CALC_TABLE_MAX 1000   /* most rows a table can have */
+
+typedef struct {
+    Value x, f, g;
+    char *f_error, *g_error;   /* why a cell couldn't be computed, else NULL */
+} TableRow;
+
+typedef struct {
+    TableRow *rows;
+    int count;
+    int has_g;
+} Table;
+
+/*
+ * Fills `out` with f(x) (and g(x) unless g is NULL or empty) for x = start,
+ * start + step, ... up to end. f and g are expressions in x, like "x^2 + 1";
+ * start, end and step are expressions too. x goes up exactly, so a step of
+ * 0.1 never drifts. Returns 0, or -1 with a message in err.
+ */
+int calc_table(Calc *c, const char *f, const char *g, const char *start, const char *end,
+               const char *step, Table *out, char *err, size_t errlen);
+void table_free(Table *t);
+
+/* A value shortened to fit `width` characters, for a table cell (malloc'd). */
+char *calc_cell(const Calc *c, const Value *v, int width);
+
 #endif

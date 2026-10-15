@@ -28,6 +28,7 @@ static const char HELP[] =
     "Implicit:   2pi  3(4+1)  2sin(30)  mean 2*pi, 3*(4+1), 2*sin(30)\n"
     "Commands:   :deg  :rad  :sci  :fix  :digits N  :help  :quit\n"
     "Saving:     :vars  :clear [name]  :save [file]  :load file   (saved automatically)\n"
+    "Tables:     :table x^2 + 1 from 1 to 5 step 1    (add ; g(x) after f(x) for two columns)\n"
     "\xE2\x89\x88 marks an approximate result; everything else is exact.";
 
 static char *dup_str(const char *s)
@@ -297,6 +298,259 @@ int calc_use_store(Calc *c, const char *path)
     return load_store(c, path);
 }
 
+/* ---- Tables ------------------------------------------------------------------ */
+
+/* Evaluates a parsed expression with `var` (if not NULL) bound to x. */
+static int eval_with(Calc *c, const Node *tree, const char *var, const Value *x, Value *out, char *err,
+                     size_t errlen)
+{
+    Binding ans_lower = {"ans", &c->ans, NULL};
+    Binding ans = {"Ans", &c->ans, &ans_lower};
+    Binding xb = {var, x, &ans};
+    EvalOptions opt = {c->digits + GUARD_DIGITS, c->degrees, &c->syms};
+    return eval(tree, var ? &xb : &ans, &opt, out, err, errlen);
+}
+
+/* Parses an expression that must not be a definition. */
+static Node *parse_expression(const char *text, const char *what, char *err, size_t errlen)
+{
+    char msg[200];
+    Node *tree = parse(text, msg, sizeof msg);
+    if (tree && (tree->kind == NODE_ASSIGN || tree->kind == NODE_DEFUN)) {
+        node_free(tree);
+        snprintf(err, errlen, "%s can't be a definition", what);
+        return NULL;
+    }
+    if (!tree)
+        snprintf(err, errlen, "%s: %s", what, msg);
+    return tree;
+}
+
+/* Evaluates a real number like Start or Step. */
+static int eval_real(Calc *c, const char *text, const char *what, Value *out, char *err, size_t errlen)
+{
+    char msg[200];
+    Node *tree = parse_expression(text, what, err, errlen);
+    if (!tree)
+        return -1;
+    int rc = eval_with(c, tree, NULL, NULL, out, msg, sizeof msg);
+    node_free(tree);
+    if (rc) {
+        snprintf(err, errlen, "%s: %s", what, msg);
+        return -1;
+    }
+    if (!rat_is_zero(&out->im)) {
+        snprintf(err, errlen, "%s must be a real number", what);
+        return -1;
+    }
+    return 0;
+}
+
+void table_free(Table *t)
+{
+    for (int i = 0; i < t->count; i++) {
+        val_free(&t->rows[i].x);
+        val_free(&t->rows[i].f);
+        val_free(&t->rows[i].g);
+        free(t->rows[i].f_error);
+        free(t->rows[i].g_error);
+    }
+    free(t->rows);
+    t->rows = NULL;
+    t->count = 0;
+}
+
+int calc_table(Calc *c, const char *f, const char *g, const char *start, const char *end,
+               const char *step, Table *out, char *err, size_t errlen)
+{
+    Value a, b, h;
+    Rational span;
+    Node *ft = NULL, *gt = NULL;
+    int rc = -1;
+    val_init(&a);
+    val_init(&b);
+    val_init(&h);
+    rat_init(&span);
+    out->rows = NULL;
+    out->count = 0;
+    out->has_g = g && *g;
+
+    if (!(ft = parse_expression(f, "f(x)", err, errlen)))
+        goto done;
+    if (out->has_g && !(gt = parse_expression(g, "g(x)", err, errlen)))
+        goto done;
+    if (eval_real(c, start, "Start", &a, err, errlen) || eval_real(c, end, "End", &b, err, errlen) ||
+        eval_real(c, step, "Step", &h, err, errlen))
+        goto done;
+    if (rat_is_zero(&h.r)) {
+        snprintf(err, errlen, "Step can't be 0");
+        goto done;
+    }
+
+    /* rows = floor((end - start) / step) + 1 */
+    rat_sub(&span, &b.r, &a.r);
+    rat_div(&span, &span, &h.r);
+    if (rat_sign(&span) < 0) {
+        snprintf(err, errlen, "End can't be reached from Start with this Step");
+        goto done;
+    }
+    rat_floor(&span, &span);
+    int64_t n;
+    if (rat_to_i64(&span, &n) || n + 1 > CALC_TABLE_MAX) {
+        snprintf(err, errlen, "that's more than %d rows; use a bigger Step", CALC_TABLE_MAX);
+        goto done;
+    }
+    n++;
+
+    out->rows = calloc((size_t)n, sizeof *out->rows);
+    if (!out->rows)
+        exit(1);
+    for (int i = 0; i < n; i++) {
+        TableRow *row = &out->rows[i];
+        char msg[256];
+        val_init(&row->x);
+        val_init(&row->f);
+        val_init(&row->g);
+        out->count = i + 1;
+        /* x = start + i * step, exactly (approximate only if Start or Step is) */
+        rat_set_i64(&row->x.r, i);
+        rat_mul(&row->x.r, &row->x.r, &h.r);
+        rat_add(&row->x.r, &row->x.r, &a.r);
+        row->x.exact = a.exact && h.exact;
+        if (eval_with(c, ft, "x", &row->x, &row->f, msg, sizeof msg))
+            row->f_error = dup_str(msg);
+        if (gt && eval_with(c, gt, "x", &row->x, &row->g, msg, sizeof msg))
+            row->g_error = dup_str(msg);
+    }
+    rc = 0;
+
+done:
+    if (rc)
+        table_free(out);
+    node_free(ft);
+    node_free(gt);
+    val_free(&a);
+    val_free(&b);
+    val_free(&h);
+    rat_free(&span);
+    return rc;
+}
+
+static size_t text_width(const char *s)
+{
+    size_t n = 0;
+    for (; *s; s++)
+        n += ((unsigned char)*s & 0xC0) != 0x80;
+    return n;
+}
+
+/* val_to_str without the "≈ " and "  (= 1/3)" decorations */
+static char *bare_str(const Value *v, int digits, int sci)
+{
+    char *s = val_to_str(v, digits, sci);
+    if (!s)
+        exit(1);
+    char *note = strstr(s, "  (=");
+    if (note)
+        *note = '\0';
+    if (strncmp(s, "\xE2\x89\x88 ", 4) == 0)
+        memmove(s, s + 4, strlen(s + 4) + 1);
+    return s;
+}
+
+char *calc_cell(const Calc *c, const Value *v, int width)
+{
+    (void)c;
+    /* Exact and short enough: show it as is. */
+    char *s = bare_str(v, width, 0);
+    if (!strstr(s, "...") && (int)text_width(s) <= width)
+        return s;
+    free(s);
+
+    /* Otherwise round to as many significant digits as fit. */
+    Value t;
+    val_init(&t);
+    val_copy(&t, v);
+    t.exact = 0;
+    for (int d = width; d >= 2; d--) {
+        s = bare_str(&t, d, 0);
+        if ((int)text_width(s) <= width)
+            break;
+        free(s);
+        s = NULL;
+    }
+    for (int d = width; !s && d >= 1; d--) {
+        s = bare_str(&t, d, 1);
+        if ((int)text_width(s) > width && d > 1) {
+            free(s);
+            s = NULL;
+        }
+    }
+    val_free(&t);
+    return s;
+}
+
+/* :table F [; G] from A to B [step S] */
+static char *table_command(Calc *c, const char *args, char *err, size_t errlen)
+{
+    const char *from = strstr(args, " from ");
+    const char *to = from ? strstr(from, " to ") : NULL;
+    const char *step = to ? strstr(to, " step ") : NULL;
+    if (!from || !to) {
+        snprintf(err, errlen, "usage: :table x^2 + 1 from 1 to 5 step 1  (; g(x) after f(x) adds a column)");
+        return NULL;
+    }
+    char *fg = malloc((size_t)(from - args) + 1);
+    if (!fg)
+        exit(1);
+    memcpy(fg, args, (size_t)(from - args));
+    fg[from - args] = '\0';
+    char *semi = strchr(fg, ';');
+    if (semi)
+        *semi = '\0';
+    size_t lt = (size_t)(to - from - 6), le = step ? (size_t)(step - to - 4) : strlen(to + 4);
+    char *a = malloc(lt + 1), *b = malloc(le + 1);
+    if (!a || !b)
+        exit(1);
+    memcpy(a, from + 6, lt);
+    a[lt] = '\0';
+    memcpy(b, to + 4, le);
+    b[le] = '\0';
+
+    Table t;
+    int rc = calc_table(c, fg, semi ? semi + 1 : NULL, a, b, step ? step + 6 : "1", &t, err, errlen);
+    free(a);
+    free(b);
+    free(fg);
+    if (rc)
+        return NULL;
+
+    enum { W = 22 };
+    Buf out = {0};
+    char line[256];
+    if (t.has_g)
+        snprintf(line, sizeof line, "%-*s  %-*s  g(x)", W, "x", W, "f(x)");
+    else
+        snprintf(line, sizeof line, "%-*s  f(x)", W, "x");
+    put(&out, line);
+    for (int i = 0; i < t.count; i++) {
+        TableRow *row = &t.rows[i];
+        char *cells[3] = {calc_cell(c, &row->x, W), row->f_error ? dup_str("ERROR") : calc_cell(c, &row->f, W),
+                          !t.has_g ? dup_str("") : row->g_error ? dup_str("ERROR") : calc_cell(c, &row->g, W)};
+        put(&out, "\n");
+        for (int k = 0; k < (t.has_g ? 3 : 2); k++) {
+            put(&out, cells[k]);
+            if (k + 1 < (t.has_g ? 3 : 2))
+                for (size_t pad = text_width(cells[k]); pad < W + 2; pad++)
+                    put(&out, " ");
+        }
+        for (int k = 0; k < 3; k++)
+            free(cells[k]);
+    }
+    table_free(&t);
+    return out.s;
+}
+
 static char *command(Calc *c, const char *cmd, char *err, size_t errlen)
 {
     char word[32], extra[2];
@@ -327,6 +581,8 @@ static char *command(Calc *c, const char *cmd, char *err, size_t errlen)
     }
     if (strcmp(word, "vars") == 0)
         return list_symbols(c);
+    if (strcmp(word, "table") == 0)
+        return table_command(c, cmd + strlen("table"), err, errlen);
     if (strcmp(word, "save") == 0 || strcmp(word, "load") == 0) {
         char path[1024];
         int load = word[0] == 'l';
