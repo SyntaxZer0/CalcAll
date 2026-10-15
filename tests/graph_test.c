@@ -50,15 +50,15 @@ int main(void)
         "2 + 3",             /* 9 a value */
         "w(x)",              /* 10 the user's function */
         "y = 5",             /* 11 a horizontal line */
-        "x = 3",             /* 12 not supported */
+        "x = 3",             /* 12 a vertical line */
         "sin = 2",           /* 13 reserved */
         "",                  /* 14 */
     };
     int n = sizeof lines / sizeof *lines;
-    graph_build(&g, &c, lines, n);
+    graph_build(&g, &c, lines, NULL, n);
 
     expect("kinds", g.rows[0].kind == GR_PLOT && g.rows[6].kind == GR_SLIDER && g.rows[8].kind == GR_FUNC &&
-                        g.rows[9].kind == GR_VALUE && g.rows[11].plots && g.rows[12].kind == GR_ERROR &&
+                        g.rows[9].kind == GR_VALUE && g.rows[11].plots && g.rows[12].kind == GR_XOFY &&
                         g.rows[13].kind == GR_ERROR && g.rows[14].kind == GR_EMPTY, NULL);
     expect("value", g.rows[9].value == 5, NULL);
     expect("slider value", g.rows[6].value == 2, NULL);
@@ -78,6 +78,52 @@ int main(void)
     point(&c, &g, 7, -1, PT_ROOT, 0.4, 0.6, "0.5", "0");                     /* uses the slider exactly */
     point(&c, &g, 0, -1, PT_YINT, 0, 0, "0", "-2");
 
+    graph_free(&g);
+
+    /* Phase 2: equations, inequalities, parametric, polar, points */
+    char *more[] = {
+        "x^2 + y^2 = 1",          /* 0 implicit */
+        "y < x",                  /* 1 inequality with an ordinary edge */
+        "x^2 + y^2 >= 4",         /* 2 inequality, edge traced */
+        "x = y^2",                /* 3 sideways */
+        "(cos(t), sin(t))",       /* 4 parametric */
+        "r = 2",                  /* 5 polar */
+        "(1, 2), (3, 4)",         /* 6 points */
+        "y = y^2 + x",            /* 7 implicit through y on both sides */
+        "a = 2",                  /* 8 */
+        "(1/3, a)",               /* 9 a point using the slider */
+        "x + y",                  /* 10 needs an equation */
+        "r < 2",                  /* 11 not supported */
+        "y <= x^2",               /* 12 */
+        "xy = 1",                 /* 13 the hyperbola, not a variable called xy */
+    };
+    char *ranges[2 * 14];
+    for (int i = 0; i < 28; i++)
+        ranges[i] = i == 9 ? "pi" : "";   /* line 4's t: 0 to pi */
+    graph_build(&g, &c, more, ranges, 14);
+    GraphRow *r = g.rows;
+    expect("implicit", r[0].kind == GR_IMPLICIT && graph_d(&r[0], 1, 0) == 0 && graph_d(&r[0], 0, 0) == -1, NULL);
+    expect("inequality", r[1].kind == GR_INEQ && r[1].fy && graph_inside(&r[1], graph_d(&r[1], 0, -1)) &&
+                             !graph_inside(&r[1], graph_d(&r[1], 0, 1)), NULL);
+    expect("inequality traced", r[2].kind == GR_INEQ && !r[2].fy && graph_inside(&r[2], graph_d(&r[2], 3, 0)) &&
+                                    !graph_inside(&r[2], graph_d(&r[2], 0, 0)), NULL);
+    expect("sideways", r[3].kind == GR_XOFY && graph_x_of_y(&r[3], 2) == 4, NULL);
+    double px, py;
+    expect("parametric", r[4].kind == GR_PARAM && graph_param(&r[4], 3.14159265358979 / 2, &px, &py) &&
+                             fabs(px) < 1e-12 && fabs(py - 1) < 1e-12 && fabs(r[4].tmax - 3.14159265358979) < 1e-12,
+           NULL);
+    expect("polar", r[5].kind == GR_POLAR && graph_param(&r[5], 0, &px, &py) && px == 2 && py == 0, NULL);
+    expect("points", r[6].kind == GR_POINTS && r[6].npoints == 2 && r[6].px[1] == 3 && r[6].py[1] == 4, NULL);
+    expect("implicit y", r[7].kind == GR_IMPLICIT && graph_d(&r[7], 0, 1) == 0, NULL);
+    expect("needs y", r[10].kind == GR_ERROR, NULL);
+    expect("polar inequality", r[11].kind == GR_ERROR, NULL);
+    expect("<=", r[12].kind == GR_INEQ && graph_inside(&r[12], graph_d(&r[12], 2, 4)), NULL);
+    expect("xy = 1", r[13].kind == GR_IMPLICIT && graph_d(&r[13], 2, 0.5) == 0, NULL);
+    char *xs = NULL, *ys = NULL;
+    int rc = graph_exact_coords(&c, &g, 9, 0, &xs, &ys);
+    expect("exact point", rc == 0 && strcmp(xs, "0.33333333333333333333...") == 0 && strcmp(ys, "2") == 0, xs);
+    free(xs);
+    free(ys);
     graph_free(&g);
     calc_free(&c);
     printf("%d passed, %d failed\n", pass, fail);

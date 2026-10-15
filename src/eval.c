@@ -1676,6 +1676,9 @@ static int eval_node(const Node *n, const Binding *env, Value *out, Ctx *c)
     case NODE_ASSIGN:
     case NODE_DEFUN:
         return fail(c, "a definition can only be a whole line");
+    case NODE_REL:
+    case NODE_POINTS:
+        return fail(c, "equations and points only work in the Graph tab");
     }
     return fail(c, "internal error: unknown node");
 }

@@ -95,6 +95,20 @@ x^2 - 2x + 3 is exactly (1, 2); a root of x^2 - 2 is √2 to every digit). The
 window widens the first time you open the Graph tab, and the list sits beside
 the graph when there's room.
 
+Lines can also be:
+
+| | |
+|---|---|
+| Equations | `x^2 + y^2 = 9`, `xy = 1`, `x = y^2 - 4`, `y = y^2 + x` |
+| Inequalities | `y < sin(x)`, `x^2 + y^2 <= 4`, `x > 4` (shaded; a dashed edge isn't included) |
+| Parametric curves | `(3cos(t), 2sin(2t))`, with t's range in the boxes under the line |
+| Polar curves | `r = 1 + cos(θ)` (type `theta`), with θ's range under the line |
+| Points | `(1, 2)`, `(1, 2), (-4, 1), (a, -3)`; click one for its exact coordinates |
+
+`<=` and `>=` can be typed for ≤ and ≥. As in Desmos, letters next to each
+other multiply (`xy = 1` is a hyperbola) and `r = 2` is a circle, not a
+slider.
+
 Curves are drawn with a fast floating-point evaluator so panning stays
 smooth; asymptotes (1/x, tan x) and jumps (floor x) are left as gaps instead
 of being joined up. Graph lines can use your own variables and functions,

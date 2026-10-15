@@ -28,7 +28,9 @@ typedef enum {
     NODE_SUM,    /* sum of args[2] for `name` from args[0] to args[1] */
     NODE_PROD,   /* product of args[2] for `name` from args[0] to args[1] */
     NODE_ASSIGN, /* name = args[0]  (only as a whole line) */
-    NODE_DEFUN   /* name(params...) = args[0]  (only as a whole line) */
+    NODE_DEFUN,  /* name(params...) = args[0]  (only as a whole line) */
+    NODE_REL,    /* args[0] `op` args[1], op one of = < > l (<=) g (>=); graph lines only */
+    NODE_POINTS  /* points (args[0], args[1]), (args[2], args[3]), ...; graph lines only */
 } NodeKind;
 
 #define MAX_PARAMS 8
@@ -51,6 +53,13 @@ struct Node {
  * Returns NULL and writes a message to err on a syntax error.
  */
 Node *parse(const char *src, char *err, size_t errlen);
+
+/*
+ * Like parse(), for a line of a graph, which can also be an equation or
+ * inequality ("x^2 + y^2 = 1", "y < sin(x)", "<=", ">=", "≤", "≥") or points
+ * ("(1, 2)", "(cos(t), sin(t))", "(1, 2), (3, 4)").
+ */
+Node *parse_graph_line(const char *src, char *err, size_t errlen);
 void node_free(Node *n);
 
 #endif

@@ -32,6 +32,7 @@ void fenv_set_func(FEnv *env, const char *name, char *const *params, int nparams
 FExpr *fexpr_compile(FEnv *env, const Node *expr, char *const *params, int nparams);
 int fexpr_unknowns(const FExpr *f, const char *const **names);
 int fexpr_uses_params(const FExpr *f);   /* does it depend on its parameters at all? */
+int fexpr_uses_param(const FExpr *f, int i);   /* ... on parameter i? */
 double fexpr_eval(const FExpr *f, const double *args);
 void fexpr_free(FExpr *f);
 

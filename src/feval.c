@@ -69,7 +69,7 @@ struct FFunc {
     int compiling;
     char *unknowns[MAX_UNKNOWNS];
     int nunknowns;
-    int uses_params;   /* the body mentions a parameter (y = 5 doesn't depend on x) */
+    int uses_params;   /* bit i: the body mentions parameter i (y = 5 doesn't use x) */
     FFunc *next;
 };
 
@@ -246,8 +246,8 @@ static FNode *compile_name(Comp *c, const char *name)
         if (c->scope[i] && strcmp(c->scope[i], name) == 0) {
             FNode *n = node(F_SLOT, 0);
             n->slot = i;
-            if (i < c->fn->nparams)
-                c->fn->uses_params = 1;
+            if (i < c->fn->nparams && i < 30)
+                c->fn->uses_params |= 1 << i;
             return n;
         }
     for (int i = 0; i < c->env->nvars; i++)
@@ -395,6 +395,14 @@ static FNode *compile(Comp *c, const Node *n)
         return f;
     }
 
+    case NODE_REL: {   /* an equation or inequality: compare lhs - rhs with 0 */
+        FNode *f = node(F_BIN, 2);
+        f->op = '-';
+        f->a[0] = compile(c, n->args[0]);
+        f->a[1] = compile(c, n->args[1]);
+        return f;
+    }
+
     case NODE_SUM:
     case NODE_PROD: {
         if (c->nscope >= MAX_SLOTS)
@@ -449,7 +457,12 @@ int fexpr_unknowns(const FExpr *f, const char *const **names)
 
 int fexpr_uses_params(const FExpr *f)
 {
-    return f->fn.uses_params;
+    return f->fn.uses_params != 0;
+}
+
+int fexpr_uses_param(const FExpr *f, int i)
+{
+    return (f->fn.uses_params >> i) & 1;
 }
 
 void fexpr_free(FExpr *f)

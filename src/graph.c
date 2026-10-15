@@ -1,5 +1,6 @@
 #include "graph.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,8 +8,14 @@
 
 #define GUARD 10   /* extra digits for the exact refinement */
 
-static char x_name[] = "x";
+#define TWO_PI 6.283185307179586477
+
+static char x_name[] = "x", y_name[] = "y", t_name[] = "t", theta_name[] = "\xCE\xB8";
 static char *const X_PARAM[] = {x_name};
+static char *const Y_PARAM[] = {y_name};
+static char *const XY_PARAMS[] = {x_name, y_name};
+static char *const T_PARAM[] = {t_name};
+static char *const THETA_PARAM[] = {theta_name};
 
 static char *dup(const char *s)
 {
@@ -23,6 +30,11 @@ static void row_clear(GraphRow *r)
     free(r->name);
     free(r->error);
     fexpr_free(r->fx);
+    fexpr_free(r->fy);
+    free(r->px);
+    free(r->py);
+    for (int i = 0; i < r->nunknowns; i++)
+        free(r->unknowns[i]);
     node_free(r->tree);
     free(r->text);
     memset(r, 0, sizeof *r);
@@ -51,13 +63,210 @@ static int plain_number(const Node *n)
     return n->kind == NODE_NUM || (n->kind == NODE_NEG && n->args[0]->kind == NODE_NUM);
 }
 
-void graph_build(Graph *g, const Calc *c, char *const *texts, int n)
+static int is_var(const Node *n, const char *name)
+{
+    return n->kind == NODE_VAR && strcmp(n->name, name) == 0;
+}
+
+/* Collects the names `f` couldn't resolve, so the line can offer sliders. */
+static void note_unknowns(GraphRow *r, const FExpr *f)
+{
+    const char *const *names;
+    int n = f ? fexpr_unknowns(f, &names) : 0;
+    for (int i = 0; i < n; i++) {
+        int seen = 0;
+        for (int k = 0; k < r->nunknowns; k++)
+            seen |= strcmp(r->unknowns[k], names[i]) == 0;
+        if (!seen && r->nunknowns < GRAPH_MAX_UNKNOWNS)
+            r->unknowns[r->nunknowns++] = dup(names[i]);
+    }
+}
+
+static int has_unknown(const GraphRow *r, const char *name)
+{
+    for (int i = 0; i < r->nunknowns; i++)
+        if (strcmp(r->unknowns[i], name) == 0)
+            return 1;
+    return 0;
+}
+
+/* A constant like the end of a t range; NaN if it isn't one. */
+static double constant_value(FEnv *env, const char *text)
+{
+    char err[256];
+    Node *t = text && *text ? parse(text, err, sizeof err) : NULL;
+    if (!t)
+        return NAN;
+    FExpr *f = fexpr_compile(env, t, NULL, 0);
+    double v = fexpr_eval(f, NULL);
+    fexpr_free(f);
+    node_free(t);
+    return v;
+}
+
+static void set_range(GraphRow *r, FEnv *env, char *const *ranges, int i)
+{
+    double lo = ranges ? constant_value(env, ranges[2 * i]) : NAN;
+    double hi = ranges ? constant_value(env, ranges[2 * i + 1]) : NAN;
+    r->tmin = isnan(lo) ? 0 : lo;
+    r->tmax = isnan(hi) ? TWO_PI : hi;
+    if (!(r->tmax > r->tmin))
+        set_error(r, "the range must go from smaller to larger");
+}
+
+/* y = f(x), x = g(y), r = f(θ): which kind of curve an assignment draws */
+static void classify_assignment(GraphRow *r, FEnv *env, char *const *ranges, int i)
+{
+    const Node *rhs = r->tree->args[0];
+    const char *name = r->tree->name;
+    if (strcmp(name, "y") == 0 || strcmp(name, "x") == 0) {
+        int is_y = name[0] == 'y';
+        FExpr *both = fexpr_compile(env, rhs, XY_PARAMS, 2);
+        if (fexpr_uses_param(both, is_y ? 1 : 0)) {
+            /* y = y^2 + x: the variable is on both sides, so it's an equation */
+            r->kind = GR_IMPLICIT;
+            r->dmode = is_y ? 1 : 2;
+            r->fx = both;
+            note_unknowns(r, r->fx);
+            return;
+        }
+        fexpr_free(both);
+        if (is_y) {
+            r->kind = GR_PLOT;
+            r->fx = fexpr_compile(env, rhs, X_PARAM, 1);
+            r->plots = 1;
+        } else {
+            r->kind = GR_XOFY;
+            r->fx = fexpr_compile(env, rhs, Y_PARAM, 1);
+        }
+        note_unknowns(r, r->fx);
+        return;
+    }
+    if (strcmp(name, "r") == 0) {   /* polar, as in Desmos: r = 2 is a circle */
+        r->kind = GR_POLAR;
+        r->fx = fexpr_compile(env, rhs, THETA_PARAM, 1);
+        note_unknowns(r, r->fx);
+        set_range(r, env, ranges, i);
+        return;
+    }
+    char err[256];
+    r->name = dup(name);
+    if (eval_is_reserved(name)) {
+        snprintf(err, sizeof err, "'%s' is built in", name);
+        set_error(r, err);
+    } else {
+        r->kind = plain_number(rhs) ? GR_SLIDER : GR_VAR;
+    }
+}
+
+static void classify_points(GraphRow *r, FEnv *env, char *const *ranges, int i)
+{
+    const Node *t = r->tree;
+    int n = (int)t->nargs / 2, uses_t = 0;
+    FExpr *fs[2 * GRAPH_MAX_ROWS] = {0};
+    if (n > GRAPH_MAX_ROWS)
+        n = GRAPH_MAX_ROWS;   /* plenty of points for one line */
+    for (int k = 0; k < 2 * n; k++) {
+        fs[k] = fexpr_compile(env, t->args[k], T_PARAM, 1);
+        uses_t |= fexpr_uses_params(fs[k]);
+        note_unknowns(r, fs[k]);
+    }
+    if (uses_t && n == 1) {   /* (cos(t), sin(t)) */
+        r->kind = GR_PARAM;
+        r->fx = fs[0];
+        r->fy = fs[1];
+        set_range(r, env, ranges, i);
+        return;
+    }
+    if (uses_t) {
+        set_error(r, "only a single point can use t");
+    } else {
+        r->kind = GR_POINTS;
+        r->npoints = n;
+        r->px = malloc((size_t)n * sizeof *r->px);
+        r->py = malloc((size_t)n * sizeof *r->py);
+        if (!r->px || !r->py)
+            exit(1);
+        double t0 = 0;
+        for (int k = 0; k < n; k++) {
+            r->px[k] = fexpr_eval(fs[2 * k], &t0);
+            r->py[k] = fexpr_eval(fs[2 * k + 1], &t0);
+        }
+    }
+    for (int k = 0; k < 2 * n; k++)
+        fexpr_free(fs[k]);
+}
+
+static void classify_relation(GraphRow *r, FEnv *env)
+{
+    const Node *t = r->tree;
+    r->fx = fexpr_compile(env, t, XY_PARAMS, 2);   /* compiles to lhs - rhs */
+    note_unknowns(r, r->fx);
+    if (has_unknown(r, "r") || has_unknown(r, "\xCE\xB8")) {
+        set_error(r, "polar equations need the form r = f(\xCE\xB8)");
+        return;
+    }
+    if (t->op == '=') {
+        r->kind = GR_IMPLICIT;
+        return;
+    }
+    r->kind = GR_INEQ;
+    r->op = t->op;
+    /* "y < f(x)": draw the edge as an ordinary curve, which looks better */
+    for (int side = 0; side < 2; side++) {
+        const Node *v = t->args[side], *other = t->args[1 - side];
+        if (!is_var(v, "y"))
+            continue;
+        FExpr *f = fexpr_compile(env, other, XY_PARAMS, 2);
+        int uses_y = fexpr_uses_param(f, 1);
+        fexpr_free(f);
+        if (!uses_y) {
+            r->fy = fexpr_compile(env, other, X_PARAM, 1);
+            /* y > f(x) and f(x) < y both mean "above" */
+            r->boundary_flip = (side == 0) == (t->op == '>' || t->op == 'g');
+            break;
+        }
+    }
+}
+
+/*
+ * "xy = 1" reads as an assignment to a variable called xy, but in a graph
+ * letters multiply (as in Desmos), so it's the equation x*y = 1.
+ */
+static void assignment_to_equation(GraphRow *r)
+{
+    Node *t = r->tree;
+    if (t->kind != NODE_ASSIGN || strlen(t->name) < 2 || (!strchr(t->name, 'x') && !strchr(t->name, 'y')))
+        return;
+    for (const char *p = t->name; *p; p++)
+        if (!isalpha((unsigned char)*p))
+            return;
+    Node *lhs = calloc(1, sizeof *lhs), *rel = calloc(1, sizeof *rel);
+    Node **args = calloc(2, sizeof *args);
+    if (!lhs || !rel || !args)
+        exit(1);
+    lhs->kind = NODE_VAR;
+    lhs->name = dup(t->name);
+    rat_init(&lhs->value);
+    rel->kind = NODE_REL;
+    rel->op = '=';
+    rat_init(&rel->value);
+    rel->args = args;
+    rel->nargs = 2;
+    args[0] = lhs;
+    args[1] = t->args[0];
+    t->args[0] = NULL;   /* the right side moves into the equation */
+    node_free(t);
+    r->tree = rel;
+}
+
+void graph_build(Graph *g, const Calc *c, char *const *texts, char *const *ranges, int n)
 {
     graph_free(g);
     g->env = fenv_new(&c->syms, c->degrees);
     g->count = n < GRAPH_MAX_ROWS ? n : GRAPH_MAX_ROWS;
 
-    /* 1. Parse every line and register local functions. */
+    /* 1. Parse every line and register local functions and variables. */
     for (int i = 0; i < g->count; i++) {
         GraphRow *r = &g->rows[i];
         char err[256];
@@ -66,29 +275,25 @@ void graph_build(Graph *g, const Calc *c, char *const *texts, int n)
             r->kind = GR_EMPTY;
             continue;
         }
-        r->tree = parse(texts[i], err, sizeof err);
+        r->tree = parse_graph_line(texts[i], err, sizeof err);
         if (!r->tree) {
             set_error(r, err);
             continue;
         }
+        assignment_to_equation(r);
         Node *t = r->tree;
-        if (t->kind == NODE_ASSIGN && strcmp(t->name, "y") == 0) {
-            r->kind = GR_PLOT;
-        } else if (t->kind == NODE_ASSIGN && strcmp(t->name, "x") == 0) {
-            set_error(r, "x = ... lines aren't supported yet");
-        } else if (t->kind == NODE_ASSIGN || t->kind == NODE_DEFUN) {
+        if (t->kind == NODE_DEFUN) {
             r->name = dup(t->name);
             if (eval_is_reserved(t->name)) {
                 snprintf(err, sizeof err, "'%s' is built in", t->name);
                 set_error(r, err);
-            } else if (t->kind == NODE_DEFUN) {
+            } else {
                 r->kind = GR_FUNC;
                 fenv_set_func(g->env, t->name, t->params, (int)t->nparams, t->args[0]);
-            } else {
-                r->kind = plain_number(t->args[0]) ? GR_SLIDER : GR_VAR;
             }
-        } else {
-            r->kind = GR_PLOT;
+        } else if (t->kind == NODE_ASSIGN && strcmp(t->name, "x") != 0 && strcmp(t->name, "y") != 0 &&
+                   strcmp(t->name, "r") != 0) {
+            classify_assignment(r, g->env, ranges, i);   /* a slider or a variable */
         }
     }
 
@@ -105,27 +310,40 @@ void graph_build(Graph *g, const Calc *c, char *const *texts, int n)
         }
     }
 
-    /* 3. Curves and values, now that every name is known. */
+    /* 3. Everything that draws, now that every name is known. */
     for (int i = 0; i < g->count; i++) {
         GraphRow *r = &g->rows[i];
-        if (r->kind == GR_PLOT) {
-            const Node *e = r->tree->kind == NODE_ASSIGN ? r->tree->args[0] : r->tree;
-            r->fx = fexpr_compile(g->env, e, X_PARAM, 1);
-            /* "2 + 3" is a value to show; "y = 5" is still a line. */
-            if (!fexpr_uses_params(r->fx) && r->tree->kind != NODE_ASSIGN) {
-                r->kind = GR_VALUE;
+        if (!r->tree || r->kind == GR_ERROR)
+            continue;
+        Node *t = r->tree;
+        if (t->kind == NODE_POINTS) {
+            classify_points(r, g->env, ranges, i);
+        } else if (t->kind == NODE_REL) {
+            classify_relation(r, g->env);
+        } else if (t->kind == NODE_ASSIGN && (r->kind == GR_EMPTY || r->kind == GR_PLOT)) {
+            classify_assignment(r, g->env, ranges, i);   /* y = ..., x = ..., r = ... */
+        } else if (r->kind == GR_FUNC) {
+            r->fx = fexpr_compile(g->env, t->args[0], t->params, (int)t->nparams);
+            note_unknowns(r, r->fx);
+            r->plots = t->nparams == 1;
+        } else if (r->kind == GR_VAR || r->kind == GR_SLIDER) {
+            FExpr *f = fexpr_compile(g->env, t->args[0], NULL, 0);
+            note_unknowns(r, f);
+            fexpr_free(f);
+            if (isnan(r->value) && r->nunknowns == 0)
+                set_error(r, "undefined");
+        } else if (t->kind != NODE_ASSIGN && t->kind != NODE_DEFUN) {
+            r->fx = fexpr_compile(g->env, t, X_PARAM, 1);
+            note_unknowns(r, r->fx);
+            if (has_unknown(r, "y")) {
+                set_error(r, "use y = ..., or an equation with y");
+            } else if (!fexpr_uses_params(r->fx)) {
+                r->kind = GR_VALUE;   /* "2 + 3" is a value to show */
                 r->value = fexpr_eval(r->fx, (double[]){0});
             } else {
+                r->kind = GR_PLOT;
                 r->plots = 1;
             }
-        } else if (r->kind == GR_FUNC) {
-            r->fx = fexpr_compile(g->env, r->tree->args[0], r->tree->params, (int)r->tree->nparams);
-            r->plots = r->tree->nparams == 1;
-        } else if (r->kind == GR_VAR || r->kind == GR_SLIDER) {
-            /* compiled only to find names that need sliders */
-            r->fx = fexpr_compile(g->env, r->tree->args[0], NULL, 0);
-            if (isnan(r->value) && !graph_unknowns(r, &(const char *const *){0}))
-                set_error(r, "undefined");
         }
     }
 }
@@ -135,13 +353,52 @@ double graph_y(const GraphRow *r, double x)
     return r->plots ? fexpr_eval(r->fx, &x) : NAN;
 }
 
-int graph_unknowns(const GraphRow *r, const char *const **names)
+double graph_x_of_y(const GraphRow *r, double y)
 {
-    if (!r->fx) {
-        *names = NULL;
+    return r->kind == GR_XOFY ? fexpr_eval(r->fx, &y) : NAN;
+}
+
+double graph_d(const GraphRow *r, double x, double y)
+{
+    double xy[2] = {x, y};
+    double v = fexpr_eval(r->fx, xy);
+    return r->dmode == 1 ? y - v : r->dmode == 2 ? x - v : v;
+}
+
+int graph_inside(const GraphRow *r, double d)
+{
+    switch (r->op) {
+    case '<':
+        return d < 0;
+    case '>':
+        return d > 0;
+    case 'l':
+        return d <= 0;
+    case 'g':
+        return d >= 0;
+    }
+    return 0;
+}
+
+int graph_param(const GraphRow *r, double t, double *x, double *y)
+{
+    if (r->kind == GR_PARAM) {
+        *x = fexpr_eval(r->fx, &t);
+        *y = fexpr_eval(r->fy, &t);
+    } else if (r->kind == GR_POLAR) {
+        double rad = fexpr_eval(r->fx, &t);
+        *x = rad * cos(t);
+        *y = rad * sin(t);
+    } else {
         return 0;
     }
-    return fexpr_unknowns(r->fx, names);
+    return !isnan(*x) && !isnan(*y);
+}
+
+int graph_unknowns(const GraphRow *r, const char *const **names)
+{
+    *names = (const char *const *)r->unknowns;
+    return r->nunknowns;
 }
 
 /* ---- Exact refinement ---------------------------------------------------------- */
@@ -494,5 +751,31 @@ int graph_exact_point(Calc *c, const Graph *g, int row, int other, PointKind kin
     val_free(&root);
     val_free(&v);
     val_free(&w);
+    return rc;
+}
+
+int graph_exact_coords(Calc *c, const Graph *g, int row, int index, char **xs, char **ys)
+{
+    const GraphRow *r = &g->rows[row];
+    if (r->kind != GR_POINTS || index < 0 || index >= r->npoints)
+        return -1;
+    Exact x;
+    exact_init(&x, c, g, c->digits + GUARD);
+    Value v[2];
+    char err[256];
+    int rc = 0;
+    for (int k = 0; k < 2; k++) {
+        val_init(&v[k]);
+        EvalOptions opt = {x.prec, c->degrees, &x.syms};
+        if (eval(r->tree->args[2 * index + k], NULL, &opt, &v[k], err, sizeof err))
+            rc = -1;
+    }
+    if (rc == 0) {
+        *xs = value_text(c, &v[0]);
+        *ys = value_text(c, &v[1]);
+    }
+    val_free(&v[0]);
+    val_free(&v[1]);
+    sym_free(&x.syms);
     return rc;
 }

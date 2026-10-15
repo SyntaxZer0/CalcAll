@@ -464,3 +464,95 @@ Node *parse(const char *src, char *err, size_t errlen)
     }
     return n;
 }
+
+/* A relation operator at the current token: =, <, >, <=, >=, ≤ or ≥. */
+static char relation_op(Parser *P)
+{
+    if (P->tok.kind == T_NAME && P->tok.len == 3 && memcmp(P->tok.start, "\xE2\x89\xA4", 3) == 0)
+        return 'l';
+    if (P->tok.kind == T_NAME && P->tok.len == 3 && memcmp(P->tok.start, "\xE2\x89\xA5", 3) == 0)
+        return 'g';
+    if (P->tok.kind != T_OP || !strchr("=<>", P->tok.op))
+        return 0;
+    char op = P->tok.op;
+    if (op != '=' && P->p[0] == '=') {   /* <= and >= */
+        P->p++;
+        return op == '<' ? 'l' : 'g';
+    }
+    return op;
+}
+
+/* "(a, b)" or "(a, b), (c, d), ..."; NULL (and *P untouched) if it isn't one. */
+static Node *parse_points(Parser *P)
+{
+    Parser start = *P;
+    Node *n = new_node(NODE_POINTS, 0);
+    while (is_op(P, '(')) {
+        next(P);
+        Node *a = parse_expr(P);
+        if (!a || !is_op(P, ',')) {
+            node_free(a);
+            goto not_points;
+        }
+        next(P);
+        Node *b = parse_expr(P);
+        if (!b || !is_op(P, ')')) {
+            node_free(a);
+            node_free(b);
+            goto not_points;
+        }
+        next(P);
+        add_arg(n, a);
+        add_arg(n, b);
+        if (!is_op(P, ','))
+            break;
+        next(P);
+    }
+    if (n->nargs > 0 && P->tok.kind == T_END)
+        return n;
+not_points:
+    node_free(n);
+    *P = start;
+    return NULL;
+}
+
+Node *parse_graph_line(const char *src, char *err, size_t errlen)
+{
+    Parser P = {src, src, {T_END, src, 0, 0}, err, errlen, 0};
+    next(&P);
+    if (P.tok.kind == T_END) {
+        fail(&P, "empty expression");
+        return NULL;
+    }
+    Node *n = is_op(&P, '(') ? parse_points(&P) : NULL;
+    if (n)
+        return n;
+    n = parse_statement(&P);
+    char op;
+    if (n && n->kind != NODE_DEFUN && (op = relation_op(&P)) != 0) {
+        /* "x^2 + y^2 = 1" or "y < x": a definition like "y = x" can't go on to "< 1" */
+        if (n->kind == NODE_ASSIGN) {
+            fail(&P, "unexpected '%.*s'", (int)P.tok.len, P.tok.start);
+        } else {
+            next(&P);
+            Node *rhs = parse_expr(&P);
+            if (rhs) {
+                Node *rel = new_node(NODE_REL, 2);
+                rel->op = op;
+                rel->args[0] = n;
+                rel->args[1] = rhs;
+                n = rel;
+            } else {
+                node_free(n);
+                n = NULL;
+            }
+        }
+    }
+    if (n && P.tok.kind != T_END)
+        fail(&P, "unexpected '%.*s'", (int)P.tok.len, P.tok.start);
+    if (P.failed) {
+        node_free(n);
+        return NULL;
+    }
+    return n;
+}

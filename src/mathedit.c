@@ -343,7 +343,7 @@ static void leave(Editor *e, Item *owner)
     e->pos = item_index(owner) + 1;
 }
 
-static const char *const WORDS[] = {"sum", "prod", "sqrt", "root", "cbrt", "abs", "exp", "frac", "pi"};
+static const char *const WORDS[] = {"sum", "prod", "sqrt", "root", "cbrt", "abs", "exp", "frac", "pi", "theta"};
 
 void ed_type(Editor *e, const char *ch)
 {
@@ -425,6 +425,8 @@ void ed_type(Editor *e, const char *ch)
             ed_insert_pow(e, NULL);
             e->row->owner->closes = CLOSE_ON_PAREN;
             e->fresh = 1;
+        } else if (strcmp(word, "theta") == 0) {
+            ed_insert_text(e, "\xCE\xB8");   /* θ, for polar graphs */
         } else {
             ed_insert_text(e, "\xCF\x80");   /* pi -> π */
         }
