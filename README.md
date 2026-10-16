@@ -24,9 +24,9 @@ correct to every digit shown.
 - **Natural display.** Fractions, roots, powers, logs, |x|, Σ, Π, ∫ and d/dx
   are templates with boxes to fill in, and the answer appears in the bottom
   right.
-- **Type it or tap it.** In TEXT mode you just type: `sum` turns into Σ, `/`
-  makes a fraction, `^` starts a power and Tab moves between boxes. KEYS mode
-  brings back the calculator buttons.
+- **Type it or tap it.** In TEXT mode you just type: `sum` turns into Σ,
+  `/` divides, Shift+`/` makes a fraction, `^` starts a power and Tab moves
+  between boxes. KEYS mode brings back the calculator buttons.
 - **Exact answers.** `2^100` shows all 31 digits, `0.1 + 0.2` is exactly
   `0.3`, and `1/3` is a fraction. S⇔D switches between fractions and
   decimals.
@@ -107,7 +107,8 @@ what you type turns into templates:
 | `int` | ∫ with boxes for the variable, start and end, and the body |
 | `d/dx(` | a derivative: `d/dx(x^3, 2)` is the slope of x³ at 2 |
 | `sqrt`, `cbrt`, `root` | √ templates |
-| `/` | a fraction, with what's before it on top: `1/2+3` is ½ + 3 |
+| `/` | ÷, plain division |
+| Shift+`/` (`?`) | a fraction, with what's before it on top: `1`, Shift+`/`, `2+3` is ½ + 3 |
 | `^` | a power: `2^10-1` is 2¹⁰ − 1 |
 | `abs`, `exp`, `frac` | \|x\|, eˣ, a fraction |
 | `pi`, `theta` | π, θ |
@@ -115,7 +116,8 @@ what you type turns into templates:
 | `,` or Tab | the next box (Shift+Tab goes back) |
 | `)` | leaves the box you're in |
 
-Typing or pasting `sum(k=1, 10, k^2)` builds the whole Σ. Use the arrow keys
+Typing or pasting `sum(k=1, 10, k^2)` builds the whole Σ, and pasted text
+turns `1/2` into a fraction. Use the arrow keys
 to move the cursor: Up and Down move between the top and bottom of a
 fraction or sum, and otherwise step through earlier answers. Esc clears the
 line. Starting with an operator carries on from the last answer, so `×3`

@@ -81,7 +81,8 @@ void ed_insert_pow(Editor *e, const char *exponent);
  * Types one character the way text mode does: names like sum, prod, int,
  * sqrt, root, cbrt, abs, exp and frac become templates as soon as they're
  * typed (and pi becomes π, theta θ), and so does d/dx( for a derivative;
- * "/" and "^" make a fraction and a power. Inside a
+ * "/" and "^" make a fraction and a power ("÷" divides without making a
+ * fraction). Inside a
  * template, "," (and "=" after a sum's variable) moves to the next box and
  * ")" leaves the template, so "sum(k=1, 10, k^2)" typed or pasted as text
  * builds the same thing as the buttons do.

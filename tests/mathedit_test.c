@@ -235,6 +235,23 @@ int main(void)
     ed_insert_text(&e, "2");
     check("keys d/dt", &e, "d/dt(t^3, 2)", "12");
 
+    /* ÷ divides without a fraction, and still ends an exponent; d÷dx( is a derivative */
+    const char *divide[][3] = {
+        {"2^3", "/4+1", "2^3/4+1"},
+        {"d", "/dx(x^2,3)", "d/dx(x^2, 3)"},
+        {"1", "/2", "1/2"},
+    };
+    const char *divide_value[] = {"3", "6", "0.5"};
+    for (int i = 0; i < 3; i++) {
+        ed_clear(&e);
+        for (int k = 0; k < 2; k++)
+            for (const char *p = divide[i][k]; *p; p++) {
+                char ch[2] = {*p, '\0'};
+                ed_type(&e, *p == '/' ? "\xC3\xB7" : ch);
+            }
+        check(divide[i][2], &e, divide[i][2], divide_value[i]);
+    }
+
     /* Tab walks through the boxes and out. */
     ed_clear(&e);
     ed_insert_template(&e, IT_FRAC, 0);

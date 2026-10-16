@@ -354,8 +354,36 @@ static int is_name_item(const Item *it)
     return it->kind == IT_CHAR && (isalpha((unsigned char)it->ch[0]) || (unsigned char)it->ch[0] >= 0x80);
 }
 
+/* d/dx typed with "/" as division: the characters d / d x right before the cursor. */
+static int derivative_from_division(Editor *e)
+{
+    Row *r = e->row;
+    int i = e->pos;
+    while (i > 0 && is_name_item(r->items[i - 1]))
+        i--;
+    /* items i .. pos-1 are "dx" (a d, then the variable); before them "d/" */
+    if (e->pos - i < 2 || !is_char(r->items[i], 'd') || i < 2 || !is_char(r->items[i - 1], '/') ||
+        !is_char(r->items[i - 2], 'd'))
+        return 0;
+    int start = i - 2;
+    if (start > 0 && is_name_item(r->items[start - 1]))
+        return 0;   /* "and/dx" isn't a derivative */
+    Item *d = item_new(IT_DIFF);
+    for (int k = i + 1; k < e->pos; k++)
+        row_insert(d->slot[0], d->slot[0]->len, row_remove(r, i + 1));
+    for (int k = start; k <= i; k++)
+        item_free(row_remove(r, start));
+    d->closes = CLOSE_ON_PAREN;
+    row_insert(r, start, d);
+    e->row = d->slot[1];
+    e->pos = 0;
+    return 1;
+}
+
 int ed_derivative(Editor *e)
 {
+    if (derivative_from_division(e))
+        return 1;
     /* the cursor at the end of the dx, or just after the fraction */
     Item *frac = e->row->owner;
     if (!frac || frac->kind != IT_FRAC || e->row != frac->slot[1] || e->pos != e->row->len)
@@ -394,6 +422,11 @@ void ed_type(Editor *e, const char *ch)
     int fresh = e->fresh;
     e->fresh = 0;
     char c = ch[1] == '\0' ? ch[0] : 0;
+    int divide = strcmp(ch, "\xC3\xB7") == 0;   /* ÷: dividing, without a fraction */
+    if (divide) {
+        ch = "/";
+        c = '/';
+    }
 
     if (c == '(' && fresh) {
         /* "sum(" or "1/(": the box is already open; now ")" closes it. */
@@ -426,7 +459,7 @@ void ed_type(Editor *e, const char *ch)
            !(c == '-' && e->row->len == 0))
         leave(e, e->row->owner);
 
-    if (c == '/') {
+    if (c == '/' && !divide) {
         ed_insert_template(e, IT_FRAC, 1);
         e->row->owner->closes = CLOSE_ON_OPERATOR;
         e->fresh = 1;

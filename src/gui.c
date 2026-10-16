@@ -7,8 +7,8 @@
  * serializes the tree to text and hands it to calc_eval(), like main.c does.
  * The result appears in the bottom right of the screen.
  *
- * Keyboard: type normally; "/" makes a fraction from the number before it,
- * "^" makes a power. Arrows and Tab move between boxes, Up/Down also
+ * Keyboard: type normally; "/" divides, "?" (Shift+/) makes a fraction from
+ * the number before it, "^" makes a power. Arrows and Tab move between boxes, Up/Down also
  * replays earlier calculations, Enter evaluates, Esc clears, Cmd/Ctrl+C
  * copies the result, Cmd/Ctrl+V pastes text.
  *
@@ -1365,16 +1365,25 @@ static void handle_keys(void)
             continue;
         }
         show_history = 0;   /* typing goes back to the calculation */
-        if (text_mode || tab == TAB_GRAPH) {   /* the graph has no keypad: words make templates */
+        if (cp == '/' || cp == '?') {
+            /* "/" divides, as the ÷ key does; Shift+/ makes a fraction: "12?" puts 12 on top */
+            begin_edit(1);
+            int typing = text_mode || tab == TAB_GRAPH;
+            if (cp == '?' && typing)
+                ed_type(cur, "/");   /* text rules: "1?2+3" is a half plus three */
+            else if (cp == '?')
+                ed_insert_template(cur, IT_FRAC, 1);
+            else if (typing)
+                ed_type(cur, "\xC3\xB7");
+            else
+                ed_insert_text(cur, "/");
+        } else if (text_mode || tab == TAB_GRAPH) {   /* the graph has no keypad: words make templates */
             int n;
             char utf8[8];
             const char *bytes = CodepointToUTF8(cp, &n);
             memcpy(utf8, bytes, (size_t)n);
             utf8[n] = '\0';
             type_char_text(utf8);
-        } else if (cp == '/') {   /* "12/" makes a fraction with 12 on top */
-            begin_edit(1);
-            ed_insert_template(cur, IT_FRAC, 1);
         } else if (cp == '^') {
             begin_edit(1);
             ed_insert_pow(cur, NULL);
@@ -3162,7 +3171,7 @@ int main(void)
         if (no_keys) {
             const char *text_hint[] = {
                 "sum prod int sqrt root cbrt abs exp frac pi, d/dx( \xE2\x86\x92 templates",
-                "Tab or , next box \xC2\xB7 ) leave \xC2\xB7 / fraction \xC2\xB7 ^ power",
+                "Tab next box \xC2\xB7 ) leave \xC2\xB7 / \xC3\xB7 \xC2\xB7 shift / fraction \xC2\xB7 ^ power",
             };
             const char *table_hint[] = {
                 "\xE2\x86\x91\xE2\x86\x93 \xE2\x86\x90\xE2\x86\x92 move \xC2\xB7 wheel scrolls \xC2\xB7 click a cell",
