@@ -579,6 +579,8 @@ static void resume_edit(void)
 static void type_text(const char *s)
 {
     begin_edit(strchr("+-*/^!%", s[0]) != NULL);
+    if (strcmp(s, "(") == 0 && ed_derivative(cur))
+        return;   /* d/dx( makes a derivative in KEYS mode too */
     ed_insert_text(cur, s);
 }
 

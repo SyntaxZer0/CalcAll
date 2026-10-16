@@ -95,6 +95,13 @@ void ed_type(Editor *e, const char *utf8_char);
  */
 void ed_from_text(Editor *e, const char *text);
 
+/*
+ * Typing "(" right after the fraction d/dx (with the cursor at the end of
+ * the dx, or just after the fraction) turns it into a derivative of x, with
+ * the cursor in its body. Returns 1 if it did. "3d/dx" keeps the 3 in front.
+ */
+int ed_derivative(Editor *e);
+
 /* Tab: jump to the next box (dir > 0) or the previous one. */
 void ed_tab(Editor *e, int dir);
 

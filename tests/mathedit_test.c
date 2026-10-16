@@ -31,6 +31,16 @@ static void check(const char *name, Editor *e, const char *text, const char *val
     free(out);
 }
 
+static void expect_true(const char *name, int ok)
+{
+    if (ok) {
+        pass++;
+    } else {
+        fail++;
+        printf("FAIL: %s\n", name);
+    }
+}
+
 static void check_empty(const char *name, Editor *e, int expected)
 {
     int empty;
@@ -200,6 +210,30 @@ int main(void)
         ed_from_text(&e, texts[i]);
         check(texts[i], &e, want[i], NULL);
     }
+
+    /* d/dx then "(" after leaving the fraction, or with keys (no text rules) */
+    ed_clear(&e);
+    for (const char *p = "d/dx"; *p; p++) {
+        char ch[2] = {*p, '\0'};
+        ed_type(&e, ch);
+    }
+    ed_right(&e);   /* out of the fraction */
+    for (const char *p = "(x^2,3)"; *p; p++) {
+        char ch[2] = {*p, '\0'};
+        ed_type(&e, ch);
+    }
+    check("d/dx then right", &e, "d/dx(x^2, 3)", "6");
+    ed_clear(&e);
+    ed_insert_template(&e, IT_FRAC, 0);
+    ed_insert_text(&e, "d");
+    ed_tab(&e, 1);
+    ed_insert_text(&e, "dt");
+    expect_true("keys d/dt(", ed_derivative(&e));
+    ed_insert_text(&e, "t");
+    ed_insert_pow(&e, "3");
+    ed_tab(&e, 1);
+    ed_insert_text(&e, "2");
+    check("keys d/dt", &e, "d/dt(t^3, 2)", "12");
 
     /* Tab walks through the boxes and out. */
     ed_clear(&e);

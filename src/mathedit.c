@@ -354,14 +354,13 @@ static int is_name_item(const Item *it)
     return it->kind == IT_CHAR && (isalpha((unsigned char)it->ch[0]) || (unsigned char)it->ch[0] >= 0x80);
 }
 
-/*
- * "d/dx(" typed as text first makes the fraction d/dx; the "(" then turns it
- * into a derivative of x. Returns 1 if it did. "3d/dx(" keeps the 3 in front.
- */
-static int derivative_from_fraction(Editor *e)
+int ed_derivative(Editor *e)
 {
+    /* the cursor at the end of the dx, or just after the fraction */
     Item *frac = e->row->owner;
     if (!frac || frac->kind != IT_FRAC || e->row != frac->slot[1] || e->pos != e->row->len)
+        frac = e->pos > 0 && e->row->items[e->pos - 1]->kind == IT_FRAC ? e->row->items[e->pos - 1] : NULL;
+    if (!frac)
         return 0;
     Row *num = frac->slot[0], *den = frac->slot[1];
     if (num->len < 1 || !is_char(num->items[num->len - 1], 'd') ||
@@ -402,7 +401,7 @@ void ed_type(Editor *e, const char *ch)
             e->row->owner->closes = CLOSE_ON_PAREN;
         return;
     }
-    if (c == '(' && derivative_from_fraction(e))
+    if (c == '(' && ed_derivative(e))
         return;
 
     /* "<=", ">=" and "!=" become the symbols, for checks like 3 ≤ 4. In
