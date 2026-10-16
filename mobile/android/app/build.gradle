@@ -1,0 +1,56 @@
+/*
+ * The Android app: a full-screen WebView showing the web build of CalcAll
+ * (mobile/build/web), which is copied into src/main/assets/www first. The
+ * GitHub workflow does that and builds this with: gradle assembleRelease
+ */
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.syntaxzer0.calcall'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.syntaxzer0.calcall'
+        minSdk 24
+        targetSdk 34
+        versionCode Integer.parseInt(System.getenv('VERSION_CODE') ?: '1')
+        versionName '1.' + (System.getenv('VERSION_CODE') ?: '0')
+    }
+
+    signingConfigs {
+        /* See mobile/README.md: this key is in the repository, so that every
+         * build can install over the last one without losing your data. */
+        release {
+            storeFile file('../calcall.keystore')
+            storePassword 'calcall-public'
+            keyAlias 'calcall'
+            keyPassword 'calcall-public'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds false   // it's installed directly, not through the Play Store
+    }
+
+    applicationVariants.all { variant ->
+        variant.outputs.all { outputFileName = 'CalcAll.apk' }
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+}

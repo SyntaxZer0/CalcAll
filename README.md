@@ -56,6 +56,18 @@ correct to every digit shown.
 
 ## Install
 
+### On a phone
+
+- **iPhone:** open **https://syntaxzer0.github.io/CalcAll/** in Safari, tap
+  Share, then **Add to Home Screen**.
+- **Android:** download **CalcAll.apk** from the latest
+  [release](https://github.com/SyntaxZer0/CalcAll/releases) and open it.
+
+Both work offline. The phone versions are this same app, compiled for the
+web; see [mobile/README.md](mobile/README.md).
+
+### On a computer
+
 CalcAll needs [raylib](https://www.raylib.com) for its window. On macOS:
 
 ```sh
@@ -322,6 +334,7 @@ src/graph.c     the graph's expression list, and exact key points
 src/main.c      the terminal front end
 src/mathedit.c  the natural-display editor: templates, cursor, to-text
 src/gui.c       the raylib front end: screen, buttons, table and graph tabs
+mobile/         the phone versions: the same app, built for the web and Android
 ```
 
 Both front ends talk to the engine through `calc.h`. They pass it a line of

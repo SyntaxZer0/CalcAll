@@ -1,0 +1,87 @@
+# Builds the phone versions whenever the app changes:
+#   - the web version, published with GitHub Pages (iPhone: Safari, Share,
+#     Add to Home Screen)
+#   - the Android app, attached to a release as CalcAll.apk
+# See mobile/README.md.
+name: Phone versions
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'mobile/**', 'assets/**', '.github/workflows/mobile.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # the Android release
+  pages: write
+  id-token: write
+
+concurrency:
+  group: phone-versions
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.74
+      - name: Build raylib for the web
+        run: |
+          git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git ../raylib
+          make -C ../raylib/src PLATFORM=PLATFORM_WEB -j4
+      - name: Build CalcAll for the web
+        run: make -C mobile web RAYLIB=../../raylib VERSION=${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: mobile/build/web
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: mobile/build/web
+
+  pages:
+    needs: web
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  android:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web
+          path: mobile/android/app/src/main/assets/www
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build the Android app
+        working-directory: mobile/android
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: gradle --no-daemon assembleRelease
+      - name: Attach it to a release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-${{ github.run_number }}
+          name: CalcAll for Android (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: mobile/android/app/build/outputs/apk/release/CalcAll.apk
+          body: |
+            Download **CalcAll.apk** below on your Android phone and open it to install.
+            Android will ask you to allow installing apps from your browser (or Files app) the first time.
+            Installing a newer build over this one keeps your saved definitions and history.
