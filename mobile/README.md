@@ -28,8 +28,8 @@ raylib calls for its own:
   wide, as on a computer. The shim scales that up to the phone's real
   pixels, so text and lines stay sharp. Turned sideways, the layout gets
   wider instead, and the graph sits beside its list.
-- **Touch.** Taps are clicks. Two fingers zoom the graph (pinch) and scroll
-  lists (moving them together).
+- **Touch.** Taps are clicks, and dragging a list scrolls it. Pinching
+  zooms the graph.
 - **Typing.** The **⌨ Keyboard** button under the app brings up the
   phone's keyboard. What's typed is passed to the app in order. Phone
   keyboards have no arrow keys, so the strip has ◀ ▶ ▲ ▼ buttons for moving
