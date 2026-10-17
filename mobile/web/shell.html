@@ -61,8 +61,28 @@
     flex: 0 0 40px;
     display: flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: space-between;
+    gap: 8px;
     padding: 0 12px;
+  }
+  /* Arrows: phone keyboards have none, and they move in and out of boxes. */
+  #arrows {
+    display: flex;
+    gap: 6px;
+  }
+  #arrows button {
+    width: 44px;
+    height: 30px;
+    border-radius: 8px;
+    border: 0;
+    background: #2c2f37;
+    color: #c9ccd5;
+    font-size: 15px;
+    padding: 0;
+    touch-action: none;
+  }
+  #arrows button:active, #kbd-button:active {
+    background: #3a3e48;
   }
   #kbd-button {
     height: 30px;
@@ -88,7 +108,15 @@
 <div id="loading">Loading CalcAll…</div>
 <div id="app">
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
-  <div id="bar"><button id="kbd-button">⌨ Keyboard</button></div>
+  <div id="bar">
+    <div id="arrows">
+      <button data-key="263" aria-label="Left">◀</button>
+      <button data-key="262" aria-label="Right">▶</button>
+      <button data-key="265" aria-label="Up">▲</button>
+      <button data-key="264" aria-label="Down">▼</button>
+    </div>
+    <button id="kbd-button">⌨ Keyboard</button>
+  </div>
 </div>
 <input id="kbd" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
        enterkeyhint="done" aria-label="Type into CalcAll">
@@ -116,6 +144,22 @@
     button.addEventListener('click', function (e) {
       e.preventDefault();
       if (document.activeElement === kbd) kbd.blur(); else kbd.focus();
+    });
+    /* The arrows send arrow keys, repeating while held, without taking the
+     * focus (so the keyboard stays up). ▶ at the end of an exponent leaves it. */
+    document.querySelectorAll('#arrows button').forEach(function (b) {
+      var key = +b.dataset.key, timer = null;
+      function stop() { clearTimeout(timer); clearInterval(timer); timer = null; }
+      b.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+        stop();
+        Module.calcallInput.push(-key);
+        timer = setTimeout(function () {
+          timer = setInterval(function () { Module.calcallInput.push(-key); }, 70);
+        }, 400);
+      });
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) { b.addEventListener(t, stop); });
+      b.addEventListener('mousedown', function (e) { e.preventDefault(); });
     });
     /* Tapping the button would take the focus away before the click: keep it. */
     button.addEventListener('mousedown', function (e) { e.preventDefault(); });
