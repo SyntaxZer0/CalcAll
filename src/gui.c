@@ -80,6 +80,40 @@ static char error_text[300];  /* last error, shown until the next edit */
 static float hscroll;         /* sideways scroll of a long expression */
 static int any_hover;
 
+/*
+ * Dragging a list scrolls it, as on a phone (and with a mouse too). A press
+ * that moves more than a few pixels up or down becomes a drag, and the
+ * release that ends a drag isn't a click.
+ */
+static Vector2 pointer, pointer_before, press_at;
+static int dragging;
+
+static void track_pointer(void)
+{
+    pointer_before = pointer;
+    pointer = GetMousePosition();
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        press_at = pointer_before = pointer;
+        dragging = 0;
+    } else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && fabsf(pointer.y - press_at.y) > 8) {
+        dragging = 1;
+    }
+}
+
+/* How far a drag that started in `area` moved down this frame. */
+static float drag_scroll(Rectangle area)
+{
+    if (!dragging || !IsMouseButtonDown(MOUSE_BUTTON_LEFT) || !CheckCollisionPointRec(press_at, area))
+        return 0;
+    return pointer.y - pointer_before.y;
+}
+
+/* A click: the button let go, and not at the end of a drag. */
+static int clicked(void)
+{
+    return IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !dragging;
+}
+
 static Row *icons[8];         /* little expressions drawn on template buttons */
 
 /* Table mode, like a Casio's TABLE: f(x), g(x), Start, End, Step -> rows */
@@ -193,6 +227,44 @@ static void draw_radical(float x, float base, float s, float top, float bottom, 
 }
 
 static float prev_asc;   /* height of the item before the current one, for exponents */
+
+/*
+ * Clipping that nests: a box drawn inside a scrolling list clips to itself
+ * and the list, and when it's done the list's clipping is back on.
+ */
+static Rectangle clips[8];
+static int nclips;
+
+static void clip_apply(void)
+{
+    Rectangle r = clips[nclips - 1];
+    BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height);
+}
+
+static void clip_begin(float x, float y, float w, float h)
+{
+    Rectangle r = {x, y, w, h};
+    if (nclips > 0) {   /* only what's inside the outer clip too */
+        Rectangle o = clips[nclips - 1];
+        float x1 = fminf(r.x + r.width, o.x + o.width), y1 = fminf(r.y + r.height, o.y + o.height);
+        r.x = fmaxf(r.x, o.x);
+        r.y = fmaxf(r.y, o.y);
+        r.width = fmaxf(0, x1 - r.x);
+        r.height = fmaxf(0, y1 - r.y);
+    }
+    if (nclips < 8)
+        clips[nclips++] = r;
+    clip_apply();
+}
+
+static void clip_end(void)
+{
+    if (nclips > 0)
+        nclips--;
+    EndScissorMode();
+    if (nclips > 0)
+        clip_apply();
+}
 
 /* Is the cursor of the editor being typed in somewhere inside it? */
 static int cursor_inside(const Item *it)
@@ -847,6 +919,7 @@ static void draw_history(Rectangle area)
     }
     if (CheckCollisionPointRec(GetMousePosition(), list))
         history_scroll += GetMouseWheelMove() * 40;
+    history_scroll += drag_scroll(list);
     if (history_scroll < 0)
         history_scroll = 0;
 
@@ -855,7 +928,7 @@ static void draw_history(Rectangle area)
     float cw = tw("0", rs);
     int fit = (int)((list.width - 24) / cw);
     float y = list.y + list.height + history_scroll;
-    BeginScissorMode((int)list.x, (int)list.y, (int)list.width, (int)list.height);
+    clip_begin(list.x, list.y, list.width, list.height);
     for (int i = calc.nhistory - 1; i >= 0 && y > list.y; i--) {
         Box b = measure(hist_rows[i], es);
         float h = b.asc + b.desc + rs * 1.2f + gap;
@@ -864,7 +937,7 @@ static void draw_history(Rectangle area)
         if (CheckCollisionPointRec(GetMousePosition(), item) && CheckCollisionPointRec(GetMousePosition(), list)) {
             any_hover = 1;
             DrawRectangleRec(item, ColorBrightness(COL_SCREEN, 0.06f));
-            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            if (clicked()) {
                 reuse_history(i);
                 break;
             }
@@ -880,7 +953,7 @@ static void draw_history(Rectangle area)
         DrawTextEx(font, line, (Vector2){item.x + item.width - t.x - 10, y + gap / 2 + b.asc + b.desc}, rs, 0,
                    COL_TEXT);
     }
-    EndScissorMode();
+    clip_end();
     float top = y - list.y;   /* stop scrolling past the oldest */
     if (top > 0 && history_scroll > 0)
         history_scroll -= top < history_scroll ? top : history_scroll;
@@ -910,11 +983,11 @@ static void draw_screen(Rectangle area)
     float base = expr_area.y + b.asc + 4;
     caret_ed = shown < 0 ? &ed : NULL;
     caret_found = 0;
-    BeginScissorMode((int)area.x + 4, (int)area.y, (int)area.width - 8, (int)area.height);
+    clip_begin(area.x + 4, area.y, area.width - 8, area.height);
     layout_row(ed.root, EXPR_SIZE, 1, expr_area.x - hscroll, base, COL_TEXT);
     if (caret_found && ((int)(GetTime() * 2.5)) % 2 == 0)
         DrawRectangleRec(caret, COL_CURSOR);
-    EndScissorMode();
+    clip_end();
     caret_ed = NULL;
 
     if (caret_found) {
@@ -1058,7 +1131,7 @@ static int button_frame(Rectangle r, Color color)
         color = ColorBrightness(color, IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? -0.15f : 0.12f);
     }
     DrawRectangleRounded(r, 0.22f, 8, color);
-    return hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+    return hover && clicked();
 }
 
 static int text_button(Rectangle r, const char *label, Color color, float size)
@@ -1694,10 +1767,10 @@ static void draw_tabs(Rectangle area)
  */
 static int editor_box(Editor *e, float *scroll, int focused, Rectangle r, float size, const char *placeholder)
 {
-    int clicked = 0;
+    int hit = 0;
     if (CheckCollisionPointRec(GetMousePosition(), r)) {
         any_hover = 1;
-        clicked = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+        hit = clicked();
     }
     DrawRectangleRounded(r, 0.2f, 6, ColorBrightness(COL_SCREEN, -0.25f));
     if (focused)
@@ -1708,13 +1781,13 @@ static int editor_box(Editor *e, float *scroll, int focused, Rectangle r, float 
     float x = r.x + 8;
     caret_ed = focused ? e : NULL;
     caret_found = 0;
-    BeginScissorMode((int)r.x + 2, (int)r.y, (int)r.width - 4, (int)r.height);
+    clip_begin(r.x + 2, r.y, r.width - 4, r.height);
     layout_row(e->root, size, 1, x - *scroll, base, COL_TEXT);
     if (placeholder && ed_is_empty(e) && !focused)
         DrawTextEx(font, placeholder, (Vector2){x, r.y + (r.height - 14) / 2}, 14, 0, COL_MUTED);
     if (caret_found && ((int)(GetTime() * 2.5)) % 2 == 0)
         DrawRectangleRec(caret, COL_CURSOR);
-    EndScissorMode();
+    clip_end();
     caret_ed = NULL;
 
     float room = r.width - 16;
@@ -1727,7 +1800,7 @@ static int editor_box(Editor *e, float *scroll, int focused, Rectangle r, float 
     }
     if (b.w <= room)
         *scroll = 0;
-    return clicked;
+    return hit;
 }
 
 /* One input field of the table setup; clicking it gives it focus. */
@@ -1808,6 +1881,10 @@ static void draw_table_view(Rectangle area)
         visible = 1;
     if (CheckCollisionPointRec(GetMousePosition(), list))
         table_top -= (int)GetMouseWheelMove() * 3;
+    static float dragged;   /* part of a row, until it adds up to one */
+    dragged += drag_scroll(list);
+    table_top -= (int)(dragged / row_h);
+    dragged -= (float)(int)(dragged / row_h) * row_h;
     if (sel_row < table_top)   /* keep the selection on screen when it moves */
         table_top = sel_row;
     if (sel_row >= table_top + visible)
@@ -1817,7 +1894,7 @@ static void draw_table_view(Rectangle area)
     if (table_top < 0)
         table_top = 0;
 
-    BeginScissorMode((int)list.x, (int)list.y, (int)list.width, (int)list.height);
+    clip_begin(list.x, list.y, list.width, list.height);
     for (int i = 0; i < visible && table_top + i < table.count; i++) {
         int row = table_top + i;
         float ry = list.y + (float)i * row_h;
@@ -1829,7 +1906,7 @@ static void draw_table_view(Rectangle area)
             Rectangle cell = {x + (float)c * colw, ry, colw, row_h};
             if (CheckCollisionPointRec(GetMousePosition(), cell)) {
                 any_hover = 1;
-                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                if (clicked()) {
                     sel_row = row;
                     sel_col = c;
                 }
@@ -1842,7 +1919,7 @@ static void draw_table_view(Rectangle area)
             DrawTextEx(font, text, (Vector2){cell.x + colw - t.x - 8, ry + (row_h - t.y) / 2}, size, 0, color);
         }
     }
-    EndScissorMode();
+    clip_end();
 
     /* The selected cell in full, like the bottom line of a Casio's table. */
     float dy = area.y + area.height - detail_h;
@@ -2637,7 +2714,7 @@ static void draw_graph(Rectangle area)
                 samples[row][i] = graph_y(&graph.rows[row], sample_x[i]);
     }
 
-    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    clip_begin(area.x, area.y, area.width, area.height);
     draw_gridlines();
     for (int row = 0; row < graph.count; row++) {   /* shaded regions first, under the curves */
         const GraphRow *r = &graph.rows[row];
@@ -2797,7 +2874,7 @@ static void draw_graph(Rectangle area)
         DrawTextEx(font, lines[1], (Vector2){box.x + 10, box.y + 24}, 16, 0, COL_TEXT);
         DrawTextEx(font, lines[2], (Vector2){box.x + 10, box.y + 43}, 16, 0, COL_TEXT);
     }
-    EndScissorMode();
+    clip_end();
 
     const char *zl[] = {"+", "\xE2\x88\x92", "\xE2\x8C\x82"};
     for (int i = 0; i < 3; i++) {
@@ -2869,10 +2946,12 @@ static void draw_list(Rectangle area)
     DrawRectangleRec(area, COL_SCREEN);
     if (CheckCollisionPointRec(GetMousePosition(), area))
         list_scroll -= GetMouseWheelMove() * 30;
+    if (slider_drag < 0)
+        list_scroll -= drag_scroll(area);
     if (list_scroll < 0)
         list_scroll = 0;
 
-    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    clip_begin(area.x, area.y, area.width, area.height);
     float y = area.y + 8 - list_scroll, x = area.x + 8, w = area.width - 16;
     char buf[160];
     for (int i = 0; i < ngrows; i++) {
@@ -2891,7 +2970,7 @@ static void draw_list(Rectangle area)
                 DrawCircleV(dot, 7, curve_color(i));
             if (CheckCollisionPointCircle(GetMousePosition(), dot, 10)) {
                 any_hover = 1;
-                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+                if (clicked())
                     ghidden[i] = !ghidden[i];
             }
         } else {
@@ -2981,7 +3060,7 @@ static void draw_list(Rectangle area)
         }
         y += 34;
     }
-    EndScissorMode();
+    clip_end();
     float content = y + list_scroll - area.y;
     if (list_scroll > content - area.height + 20)
         list_scroll = content - area.height + 20 > 0 ? content - area.height + 20 : 0;
@@ -3139,6 +3218,7 @@ int main(void)
     make_icons();
 
     while (!WindowShouldClose()) {
+        track_pointer();
         handle_keys();
 
         float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();

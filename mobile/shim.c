@@ -183,7 +183,11 @@ void mob_BeginScissorMode(int x, int y, int width, int height)
 {
     int x0 = (int)floorf((float)x * scale), y0 = (int)floorf((float)y * scale);
     int x1 = (int)ceilf((float)(x + width) * scale), y1 = (int)ceilf((float)(y + height) * scale);
-    BeginScissorMode(x0, y0, x1 - x0, y1 - y0);
+    /* raylib's own version measures from a framebuffer height it may not
+     * have updated; GL counts y up from the bottom of the real canvas. */
+    rlDrawRenderBatchActive();
+    rlEnableScissorTest();
+    rlScissor(x0, pixel_h - y1, x1 - x0, y1 - y0);
 }
 
 /* ---- Touch ------------------------------------------------------------------ */
